@@ -12,7 +12,7 @@ vi.mock('vue-i18n', async (importOriginal) => {
   }
 })
 
-const STORE_URL = 'https://pay.ldxp.cn/shop/FLTH3TZ2'
+const STORE_URL = 'https://catfk.com/shop/BD9COW6C'
 
 function mountView() {
   return mount(RechargeCenterView, {
@@ -46,4 +46,3 @@ describe('RechargeCenterView', () => {
     expect(fallback.attributes('rel')).toBe('noopener noreferrer')
   })
 })
-

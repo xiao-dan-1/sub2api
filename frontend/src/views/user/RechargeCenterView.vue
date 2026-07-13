@@ -32,7 +32,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
 
 const { t } = useI18n()
-const storeUrl = 'https://pay.ldxp.cn/shop/FLTH3TZ2'
+const storeUrl = 'https://catfk.com/shop/BD9COW6C'
 </script>
 
 <style scoped>
@@ -71,4 +71,3 @@ const storeUrl = 'https://pay.ldxp.cn/shop/FLTH3TZ2'
   }
 }
 </style>
-
