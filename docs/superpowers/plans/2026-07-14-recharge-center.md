@@ -297,4 +297,3 @@ git log -3 --oneline
 ```
 
 Expected: no whitespace errors, a clean worktree, and focused commits at the branch tip.
-
