@@ -53,3 +53,17 @@ describe('AppSidebar header styles', () => {
     expect(sidebarBrandBlockMatch?.[0]).not.toContain('overflow: hidden;')
   })
 })
+
+describe('AppSidebar recharge center navigation', () => {
+  it('places Recharge Center immediately after Redeem', () => {
+    const redeemEntry = "{ path: '/redeem', label: t('nav.redeem'), icon: GiftIcon, hideInSimpleMode: true }"
+    const rechargeEntry = "{ path: '/recharge-center', label: t('nav.rechargeCenter'), icon: RechargeSubscriptionIcon }"
+    const redeemIndex = componentSource.indexOf(redeemEntry)
+    const rechargeIndex = componentSource.indexOf(rechargeEntry)
+    const nextEntryIndex = componentSource.indexOf('\n    { path:', redeemIndex + redeemEntry.length)
+
+    expect(redeemIndex).toBeGreaterThan(-1)
+    expect(rechargeIndex).toBeGreaterThan(-1)
+    expect(rechargeIndex).toBe(nextEntryIndex + 5)
+  })
+})

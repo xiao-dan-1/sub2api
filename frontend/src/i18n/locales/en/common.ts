@@ -159,6 +159,7 @@ export default {
     affiliateRebateRecords: 'Rebate Records',
     affiliateTransferRecords: 'Transfer Records',
     profile: 'Profile',
+    rechargeCenter: 'Recharge Center',
     users: 'Users',
     groups: 'Groups',
     channels: 'Channels',
