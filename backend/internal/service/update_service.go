@@ -23,8 +23,9 @@ import (
 )
 
 var (
-	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
-	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
+	ErrNoUpdateAvailable               = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
+	ErrRollbackVersionNotAllowed       = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
+	ErrCustomBuildOnlineUpdateDisabled = infraerrors.BadRequest("CUSTOM_BUILD_ONLINE_UPDATE_DISABLED", "online update is disabled for custom builds; update from your fork/custom image")
 )
 
 const (
@@ -64,7 +65,7 @@ type UpdateService struct {
 	cache          UpdateCache
 	githubClient   GitHubReleaseClient
 	currentVersion string
-	buildType      string // "source" for manual builds, "release" for CI builds
+	buildType      string // "source" for manual builds, "release" for CI builds, "custom" for forked builds
 }
 
 // NewUpdateService creates a new UpdateService
@@ -85,7 +86,7 @@ type UpdateInfo struct {
 	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
 	Cached         bool         `json:"cached"`
 	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source" or "release"
+	BuildType      string       `json:"build_type"` // "source", "release", or "custom"
 }
 
 // ReleaseInfo contains GitHub release details
@@ -151,7 +152,7 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			LatestVersion:  s.currentVersion,
 			HasUpdate:      false,
 			Warning:        err.Error(),
-			BuildType:      s.buildType,
+			BuildType:      s.effectiveBuildType(),
 		}, nil
 	}
 
@@ -163,6 +164,10 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
 func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+	if s.isCustomBuild() {
+		return ErrCustomBuildOnlineUpdateDisabled
+	}
+
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
 		return err
@@ -327,6 +332,10 @@ func (s *UpdateService) ListRollbackVersions(ctx context.Context) ([]RollbackVer
 // The target must be one of the versions returned by ListRollbackVersions;
 // anything else (including the current version) is rejected.
 func (s *UpdateService) RollbackToVersion(ctx context.Context, version string) error {
+	if s.isCustomBuild() {
+		return ErrCustomBuildOnlineUpdateDisabled
+	}
+
 	target := strings.TrimPrefix(strings.TrimSpace(version), "v")
 	if target == "" {
 		return ErrRollbackVersionNotAllowed
@@ -428,7 +437,8 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 			Assets:      assets,
 		},
 		Cached:    false,
-		BuildType: s.buildType,
+		Warning:   s.customBuildWarning(),
+		BuildType: s.effectiveBuildType(),
 	}, nil
 }
 
@@ -618,8 +628,28 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
 		ReleaseInfo:    cached.ReleaseInfo,
 		Cached:         true,
-		BuildType:      s.buildType,
+		Warning:        s.customBuildWarning(),
+		BuildType:      s.effectiveBuildType(),
 	}, nil
+}
+
+func (s *UpdateService) isCustomBuild() bool {
+	return strings.EqualFold(strings.TrimSpace(s.buildType), "custom") ||
+		hasCustomVersionSuffix(s.currentVersion)
+}
+
+func (s *UpdateService) effectiveBuildType() string {
+	if s.isCustomBuild() {
+		return "custom"
+	}
+	return s.buildType
+}
+
+func (s *UpdateService) customBuildWarning() string {
+	if !s.isCustomBuild() {
+		return ""
+	}
+	return "custom build detected; web one-click update is disabled because it would install the upstream official build"
 }
 
 func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
@@ -667,4 +697,14 @@ func parseVersion(v string) [3]int {
 		}
 	}
 	return result
+}
+
+func hasCustomVersionSuffix(v string) bool {
+	v = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), "v")
+	suffixIndex := strings.Index(v, "-")
+	if suffixIndex < 0 {
+		return false
+	}
+	suffix := v[suffixIndex+1:]
+	return strings.HasPrefix(suffix, "xd") || strings.HasPrefix(suffix, "custom")
 }

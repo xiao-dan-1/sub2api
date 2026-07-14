@@ -90,6 +90,59 @@ func TestUpdateServiceCheckUpdateCustomRevisionMatchesSameBaseVersion(t *testing
 	require.Equal(t, "0.1.153", info.LatestVersion)
 }
 
+func TestUpdateServiceCustomRevisionUsesCustomBuildTypeWhenUpstreamIsNewer(t *testing.T) {
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		&updateServiceGitHubClientStub{
+			release: &GitHubRelease{
+				TagName: "v0.1.154",
+				Name:    "v0.1.154",
+			},
+		},
+		"0.1.153-xd.1",
+		"release",
+	)
+
+	info, err := svc.CheckUpdate(context.Background(), true)
+
+	require.NoError(t, err)
+	require.True(t, info.HasUpdate)
+	require.Equal(t, "custom", info.BuildType)
+	require.Contains(t, info.Warning, "custom build")
+}
+
+func TestUpdateServicePerformUpdateRejectsCustomBuild(t *testing.T) {
+	svc := NewUpdateService(
+		&updateServiceCacheStub{},
+		&updateServiceGitHubClientStub{
+			release: &GitHubRelease{
+				TagName: "v0.1.154",
+				Name:    "v0.1.154",
+			},
+		},
+		"0.1.153-xd.1",
+		"release",
+	)
+
+	err := svc.PerformUpdate(context.Background())
+
+	require.ErrorIs(t, err, ErrCustomBuildOnlineUpdateDisabled)
+}
+
+func TestUpdateServiceRollbackToVersionRejectsCustomBuild(t *testing.T) {
+	svc := newRollbackTestService(
+		"0.1.153-xd.1",
+		[]*GitHubRelease{
+			{TagName: "v0.1.153"},
+			{TagName: "v0.1.152"},
+		},
+	)
+
+	err := svc.RollbackToVersion(context.Background(), "0.1.152")
+
+	require.ErrorIs(t, err, ErrCustomBuildOnlineUpdateDisabled)
+}
+
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {
 	return NewUpdateService(
 		&updateServiceCacheStub{},
