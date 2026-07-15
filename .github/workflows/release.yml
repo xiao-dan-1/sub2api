@@ -319,17 +319,22 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Sync VERSION file to released tag
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION=${{ github.event.inputs.tag }}
-            VERSION=${VERSION#v}
-          else
-            VERSION=${GITHUB_REF#refs/tags/v}
-          fi
+          set -euo pipefail
+          VERSION=${TAG#v}
 
           CURRENT_VERSION=$(tr -d '\r\n' < backend/cmd/server/VERSION || true)
           if [ "$CURRENT_VERSION" = "$VERSION" ]; then
             echo "VERSION file already matches $VERSION"
+            exit 0
+          fi
+
+          HIGHEST_VERSION=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$VERSION" | sort -V | tail -n 1)
+          if [ "$HIGHEST_VERSION" != "$VERSION" ]; then
+            echo "Skipping VERSION regression from $CURRENT_VERSION to $VERSION"
             exit 0
           fi
 
