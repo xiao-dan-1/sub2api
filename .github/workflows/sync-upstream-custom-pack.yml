@@ -1,0 +1,273 @@
+name: Sync Upstream Custom Pack
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_branch:
+        description: 'Upstream branch to mirror from Wei-Shaw/sub2api'
+        required: false
+        default: 'main'
+        type: string
+      mirror_branch:
+        description: 'Private fork branch that mirrors upstream'
+        required: false
+        default: 'main'
+        type: string
+      custom_branch:
+        description: 'Private fork branch with custom features'
+        required: false
+        default: 'custom'
+        type: string
+      tag_suffix:
+        description: 'Custom release suffix, e.g. xd creates v0.1.156-xd.1'
+        required: false
+        default: 'xd'
+        type: string
+      force_release:
+        description: 'Create a new custom tag even when custom branch did not change'
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: '37 * * * *'
+
+concurrency:
+  group: sync-upstream-custom-pack
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+  packages: read
+
+jobs:
+  sync-and-release:
+    name: Sync upstream, merge custom, dispatch release
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPOSITORY: Wei-Shaw/sub2api
+      UPSTREAM_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.upstream_branch || 'main' }}
+      MIRROR_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.mirror_branch || 'main' }}
+      CUSTOM_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.custom_branch || 'custom' }}
+      TAG_SUFFIX: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_suffix || 'xd' }}
+      FORCE_RELEASE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_release == 'true' }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch fork and upstream
+        id: fetch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$UPSTREAM_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid upstream branch: $UPSTREAM_BRANCH" >&2
+            exit 1
+          fi
+          if ! [[ "$MIRROR_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid mirror branch: $MIRROR_BRANCH" >&2
+            exit 1
+          fi
+          if ! [[ "$CUSTOM_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "Invalid custom branch: $CUSTOM_BRANCH" >&2
+            exit 1
+          fi
+          if ! [[ "$TAG_SUFFIX" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Invalid tag suffix: $TAG_SUFFIX" >&2
+            exit 1
+          fi
+          if [ "$MIRROR_BRANCH" = "$CUSTOM_BRANCH" ]; then
+            echo "Mirror branch and custom branch must be different." >&2
+            exit 1
+          fi
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git" 2>/dev/null || \
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+
+          git fetch origin \
+            "+refs/heads/${MIRROR_BRANCH}:refs/remotes/origin/${MIRROR_BRANCH}" \
+            "+refs/heads/${CUSTOM_BRANCH}:refs/remotes/origin/${CUSTOM_BRANCH}" \
+            --tags --prune
+          git fetch upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}" \
+            --tags --prune
+
+          upstream_sha="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_BRANCH}")"
+          mirror_sha="$(git rev-parse "refs/remotes/origin/${MIRROR_BRANCH}")"
+          custom_sha="$(git rev-parse "refs/remotes/origin/${CUSTOM_BRANCH}")"
+
+          {
+            echo "upstream_sha=${upstream_sha}"
+            echo "mirror_sha=${mirror_sha}"
+            echo "custom_sha=${custom_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mirror upstream to private main
+        id: mirror
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ steps.fetch.outputs.upstream_sha }}
+          MIRROR_SHA: ${{ steps.fetch.outputs.mirror_sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "$UPSTREAM_SHA" = "$MIRROR_SHA" ]; then
+            echo "Private ${MIRROR_BRANCH} already mirrors upstream ${UPSTREAM_BRANCH}."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git checkout -B "$MIRROR_BRANCH" "$UPSTREAM_SHA"
+          git push origin "HEAD:refs/heads/${MIRROR_BRANCH}" \
+            --force-with-lease="refs/heads/${MIRROR_BRANCH}:${MIRROR_SHA}"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Merge mirrored main into custom branch
+        id: custom
+        shell: bash
+        env:
+          CUSTOM_SHA: ${{ steps.fetch.outputs.custom_sha }}
+          UPSTREAM_SHA: ${{ steps.fetch.outputs.upstream_sha }}
+        run: |
+          set -euo pipefail
+
+          git checkout -B "$CUSTOM_BRANCH" "refs/remotes/origin/${CUSTOM_BRANCH}"
+
+          set +e
+          git merge --no-edit "$UPSTREAM_SHA"
+          merge_status=$?
+          set -e
+
+          if [ "$merge_status" -ne 0 ]; then
+            conflicted="$(git diff --name-only --diff-filter=U)"
+            if [ "$conflicted" = "backend/cmd/server/VERSION" ]; then
+              echo "Only VERSION conflicted; taking upstream base version before custom release tagging."
+              git checkout --theirs backend/cmd/server/VERSION
+              git add backend/cmd/server/VERSION
+              git commit --no-edit
+            else
+              echo "Merge conflicts require manual resolution:" >&2
+              echo "$conflicted" >&2
+              git status --short >&2
+              exit 1
+            fi
+          fi
+
+          new_custom_sha="$(git rev-parse HEAD)"
+          if [ "$new_custom_sha" = "$CUSTOM_SHA" ]; then
+            echo "Custom branch already contains mirrored upstream."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "sha=${new_custom_sha}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push origin "HEAD:refs/heads/${CUSTOM_BRANCH}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=${new_custom_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Create next custom tag
+        id: tag
+        if: steps.custom.outputs.changed == 'true' || env.FORCE_RELEASE == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git checkout "$CUSTOM_BRANCH"
+          git fetch origin --tags --force
+
+          version="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
+          if ! [[ "$version" =~ ^[0-9]+(\.[0-9]+){2}$ ]]; then
+            echo "Expected upstream base VERSION like 0.1.156, got: $version" >&2
+            exit 1
+          fi
+
+          tag_prefix="v${version}-${TAG_SUFFIX}"
+          latest_tag="$(git tag -l "${tag_prefix}.*" --sort=-v:refname | head -n 1 || true)"
+          if [ -z "$latest_tag" ]; then
+            next_number=1
+          else
+            latest_number="${latest_tag##*.}"
+            if ! [[ "$latest_number" =~ ^[0-9]+$ ]]; then
+              echo "Cannot parse latest custom tag number from: $latest_tag" >&2
+              exit 1
+            fi
+            next_number=$((latest_number + 1))
+          fi
+
+          tag="${tag_prefix}.${next_number}"
+          git tag -a "$tag" -m "Custom release ${tag}"
+          git push origin "$tag"
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Check for active Release workflow runs
+        id: active_release
+        if: steps.tag.outputs.tag != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          total=0
+          for status in queued in_progress waiting pending requested; do
+            count="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow release.yml \
+              --status "$status" \
+              --limit 20 \
+              --json databaseId \
+              --jq 'length')"
+            echo "Release runs with status ${status}: ${count}"
+            total=$((total + count))
+          done
+
+          if [ "$total" -gt 0 ]; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch Release workflow
+        if: steps.tag.outputs.tag != '' && steps.active_release.outputs.active == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$CUSTOM_BRANCH" \
+            -f "tag=${TAG}" \
+            -f "simple_release=true"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Sync Upstream Custom Pack"
+            echo
+            printf -- "- Upstream branch: \`%s/%s\`\n" "$UPSTREAM_REPOSITORY" "$UPSTREAM_BRANCH"
+            printf -- "- Mirror branch: \`%s\`\n" "$MIRROR_BRANCH"
+            printf -- "- Custom branch: \`%s\`\n" "$CUSTOM_BRANCH"
+            printf -- "- Mirror changed: \`%s\`\n" "${{ steps.mirror.outputs.changed || '' }}"
+            printf -- "- Custom changed: \`%s\`\n" "${{ steps.custom.outputs.changed || '' }}"
+            printf -- "- Created tag: \`%s\`\n" "${{ steps.tag.outputs.tag || '' }}"
+            printf -- "- Release active: \`%s\`\n" "${{ steps.active_release.outputs.active || '' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
