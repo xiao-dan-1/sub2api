@@ -54,7 +54,7 @@ jobs:
 
   # Update VERSION file with tag version
   update-version:
-    needs: [verify-ci, verify-security]
+    needs: validate-tag
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -79,7 +79,7 @@ jobs:
           retention-days: 1
 
   build-frontend:
-    needs: [verify-ci, verify-security]
+    needs: validate-tag
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -115,7 +115,7 @@ jobs:
           retention-days: 1
 
   release:
-    needs: [update-version, build-frontend]
+    needs: [verify-ci, verify-security, update-version, build-frontend]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -152,6 +152,7 @@ jobs:
 
       # Docker setup for GoReleaser
       - name: Set up QEMU
+        if: ${{ env.SIMPLE_RELEASE != 'true' }}
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
