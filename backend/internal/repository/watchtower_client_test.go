@@ -9,6 +9,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestNewWatchtowerClientHandlesCustomDefaultTransport(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, nil
+	})
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+
+	require.NotPanics(t, func() {
+		client := NewWatchtowerClient("http://watchtower:8080/v1/update", "test-token")
+		require.True(t, client.Configured())
+	})
+}
+
 func TestWatchtowerClientTriggersAuthenticatedUpdate(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, http.MethodGet, r.Method)

@@ -26,7 +26,10 @@ type watchtowerClient struct {
 
 // NewWatchtowerClient creates a client for Watchtower's authenticated HTTP API.
 func NewWatchtowerClient(endpoint, token string) service.ContainerUpdater {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := &http.Transport{}
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	}
 	transport.Proxy = nil
 	return newWatchtowerClientForTest(endpoint, token, &http.Client{
 		Transport: transport,
@@ -41,7 +44,7 @@ func newWatchtowerClientForTest(endpoint, token string, client *http.Client) *wa
 		httpClient: client,
 	}
 	if result.endpoint == "" || result.token == "" {
-		result.configErr = fmt.Errorf("Watchtower endpoint and API token are required")
+		result.configErr = fmt.Errorf("watchtower endpoint and API token are required")
 		return result
 	}
 	parsed, err := url.Parse(result.endpoint)
@@ -58,7 +61,7 @@ func (c *watchtowerClient) Configured() bool {
 func (c *watchtowerClient) TriggerUpdate(ctx context.Context) error {
 	if !c.Configured() {
 		if c == nil || c.configErr == nil {
-			return fmt.Errorf("Watchtower client is not configured")
+			return fmt.Errorf("watchtower client is not configured")
 		}
 		return c.configErr
 	}
@@ -81,7 +84,7 @@ func (c *watchtowerClient) TriggerUpdate(ctx context.Context) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, watchtowerErrorLimit))
 	detail := strings.TrimSpace(string(body))
 	if detail == "" {
-		return fmt.Errorf("Watchtower update returned %d", resp.StatusCode)
+		return fmt.Errorf("watchtower update returned %d", resp.StatusCode)
 	}
-	return fmt.Errorf("Watchtower update returned %d: %s", resp.StatusCode, detail)
+	return fmt.Errorf("watchtower update returned %d: %s", resp.StatusCode, detail)
 }
