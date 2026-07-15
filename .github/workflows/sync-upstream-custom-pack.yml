@@ -28,8 +28,13 @@ on:
         required: false
         default: false
         type: boolean
+  push:
+    branches:
+      - custom
+    paths:
+      - '.github/workflows/sync-upstream-custom-pack.yml'
   schedule:
-    - cron: '37 * * * *'
+    - cron: '7,22,37,52 * * * *'
 
 concurrency:
   group: sync-upstream-custom-pack
