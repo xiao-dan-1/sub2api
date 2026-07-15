@@ -10,12 +10,10 @@ on:
         type: string
   schedule:
     # Scheduled workflows only run on the default branch. This repository uses
-    # custom as the default branch, so this keeps fork-custom releases moving
-    # even when tag push events do not start Actions runs.
+    # custom as the default branch, so this remains a repair path if an
+    # immediate tag-create run is delayed or missed.
     - cron: '17 * * * *'
-  push:
-    tags:
-      - 'v*-xd.*'
+  create:
 
 concurrency:
   group: auto-build-missing-custom-tags
@@ -29,6 +27,11 @@ permissions:
 jobs:
   dispatch-missing-release:
     name: Dispatch Release for missing custom image
+    if: >-
+      github.event_name != 'create' ||
+      (github.event.ref_type == 'tag' &&
+      startsWith(github.event.ref, 'v') &&
+      contains(github.event.ref, '-xd.'))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tags
