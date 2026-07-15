@@ -24,9 +24,12 @@ services:
   # Sub2API Application
   # ===========================================================================
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ${UPDATE_CUSTOM_IMAGE:-ghcr.io/xiao-dan-1/sub2api}:latest
     container_name: sub2api
     restart: unless-stopped
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+      - com.centurylinklabs.watchtower.scope=${WATCHTOWER_SCOPE:?WATCHTOWER_SCOPE is required}
     ulimits:
       nofile:
         soft: 100000
@@ -153,6 +156,10 @@ services:
       # Proxy for accessing GitHub (online updates + pricing data)
       # Examples: http://host:port, socks5://host:port
       - UPDATE_PROXY_URL=${UPDATE_PROXY_URL:-}
+      - UPDATE_CUSTOM_REPO=${UPDATE_CUSTOM_REPO:-xiao-dan-1/sub2api}
+      - UPDATE_CUSTOM_IMAGE=${UPDATE_CUSTOM_IMAGE:-ghcr.io/xiao-dan-1/sub2api}
+      - UPDATE_WATCHTOWER_URL=http://watchtower:8080/v1/update
+      - UPDATE_WATCHTOWER_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:?WATCHTOWER_HTTP_API_TOKEN is required}
 
       # =======================================================================
       # Image Generation Stream & Concurrency
@@ -176,6 +183,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      watchtower:
+        condition: service_started
     networks:
       - sub2api-network
     healthcheck:
@@ -184,6 +193,31 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ===========================================================================
+  # Watchtower - internal, authenticated container updater
+  # ===========================================================================
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: sub2api-watchtower
+    restart: unless-stopped
+    command:
+      - --http-api-update
+      - --label-enable
+      - --cleanup
+      - --scope
+      - ${WATCHTOWER_SCOPE:?WATCHTOWER_SCOPE is required}
+    labels:
+      - com.centurylinklabs.watchtower.scope=${WATCHTOWER_SCOPE:?WATCHTOWER_SCOPE is required}
+    environment:
+      - WATCHTOWER_HTTP_API_TOKEN=${WATCHTOWER_HTTP_API_TOKEN:?WATCHTOWER_HTTP_API_TOKEN is required}
+      # Engine 29.0-29.2 requires API 1.44. Override to 1.40 for Engine 24 or older.
+      - DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - sub2api-network
 
   # ===========================================================================
   # PostgreSQL Database

@@ -1173,3 +1173,11 @@ update:
   # Leave empty for direct connection (recommended for overseas servers)
   # 留空表示直连（适用于海外服务器）
   proxy_url: ""
+  # Private fork used for custom release links (optional)
+  custom_repo: ""
+  # Untagged public GHCR repository used to discover custom package tags
+  custom_image: ""
+  # Internal Watchtower HTTP API endpoint, for example http://watchtower:8080/v1/update
+  watchtower_url: ""
+  # Shared bearer token for the Watchtower HTTP API
+  watchtower_token: ""

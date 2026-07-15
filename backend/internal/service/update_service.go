@@ -26,6 +26,8 @@ var (
 	ErrNoUpdateAvailable               = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed       = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
 	ErrCustomBuildOnlineUpdateDisabled = infraerrors.BadRequest("CUSTOM_BUILD_ONLINE_UPDATE_DISABLED", "online update is disabled for custom builds; update from your fork/custom image")
+	ErrCustomUpdateNotReady            = infraerrors.Conflict("CUSTOM_UPDATE_NOT_READY", "the matching custom container image is not ready yet")
+	ErrCustomUpdaterUnavailable        = infraerrors.BadRequest("CUSTOM_UPDATER_UNAVAILABLE", "the custom container updater is not configured")
 )
 
 const (
@@ -44,6 +46,8 @@ const (
 	maxRollbackVersions = 3
 	// Fetch a few extra releases so filtering (current/newer/prerelease) still leaves enough candidates
 	rollbackFetchPageSize = 15
+
+	customUpdateTriggerTimeout = 10 * time.Minute
 )
 
 // UpdateCache defines cache operations for update service
@@ -60,33 +64,86 @@ type GitHubReleaseClient interface {
 	FetchChecksumFile(ctx context.Context, url string) ([]byte, error)
 }
 
+// ContainerTagClient lists published tags for a container image repository.
+type ContainerTagClient interface {
+	ListTags(ctx context.Context, image string) ([]string, error)
+	ManifestDigest(ctx context.Context, image, reference string) (string, error)
+}
+
+// ContainerUpdater triggers replacement of the running container.
+type ContainerUpdater interface {
+	Configured() bool
+	TriggerUpdate(ctx context.Context) error
+}
+
+// UpdateServiceOptions configures the custom container update path.
+type UpdateServiceOptions struct {
+	CustomRepo  string
+	CustomImage string
+	TagClient   ContainerTagClient
+	Updater     ContainerUpdater
+}
+
 // UpdateService handles software updates
 type UpdateService struct {
 	cache          UpdateCache
 	githubClient   GitHubReleaseClient
 	currentVersion string
 	buildType      string // "source" for manual builds, "release" for CI builds, "custom" for forked builds
+	customRepo     string
+	customImage    string
+	tagClient      ContainerTagClient
+	updater        ContainerUpdater
 }
 
 // NewUpdateService creates a new UpdateService
 func NewUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, version, buildType string) *UpdateService {
+	return NewUpdateServiceWithOptions(cache, githubClient, version, buildType, UpdateServiceOptions{})
+}
+
+// NewUpdateServiceWithOptions creates an UpdateService with custom container update support.
+func NewUpdateServiceWithOptions(
+	cache UpdateCache,
+	githubClient GitHubReleaseClient,
+	version string,
+	buildType string,
+	options UpdateServiceOptions,
+) *UpdateService {
 	return &UpdateService{
 		cache:          cache,
 		githubClient:   githubClient,
 		currentVersion: version,
 		buildType:      buildType,
+		customRepo:     strings.TrimSpace(options.CustomRepo),
+		customImage:    strings.TrimSpace(options.CustomImage),
+		tagClient:      options.TagClient,
+		updater:        options.Updater,
 	}
 }
 
 // UpdateInfo contains update information
 type UpdateInfo struct {
-	CurrentVersion string       `json:"current_version"`
-	LatestVersion  string       `json:"latest_version"`
-	HasUpdate      bool         `json:"has_update"`
-	ReleaseInfo    *ReleaseInfo `json:"release_info,omitempty"`
-	Cached         bool         `json:"cached"`
-	Warning        string       `json:"warning,omitempty"`
-	BuildType      string       `json:"build_type"` // "source", "release", or "custom"
+	CurrentVersion        string       `json:"current_version"`
+	LatestVersion         string       `json:"latest_version"`
+	HasUpdate             bool         `json:"has_update"`
+	ReleaseInfo           *ReleaseInfo `json:"release_info,omitempty"`
+	Cached                bool         `json:"cached"`
+	Warning               string       `json:"warning,omitempty"`
+	BuildType             string       `json:"build_type"` // "source", "release", or "custom"
+	CustomVersion         string       `json:"custom_version,omitempty"`
+	CustomImage           string       `json:"custom_image,omitempty"`
+	CustomReleaseURL      string       `json:"custom_release_url,omitempty"`
+	CustomUpdateAvailable bool         `json:"custom_update_available"`
+	CustomUpdateReady     bool         `json:"custom_update_ready"`
+	CustomUpdateWarning   string       `json:"custom_update_warning,omitempty"`
+}
+
+// UpdateExecutionResult describes what the caller must do after an update.
+type UpdateExecutionResult struct {
+	NeedRestart      bool   `json:"need_restart"`
+	AutomaticRestart bool   `json:"automatic_restart"`
+	TargetVersion    string `json:"target_version,omitempty"`
+	TargetImage      string `json:"target_image,omitempty"`
 }
 
 // ReleaseInfo contains GitHub release details
@@ -147,13 +204,17 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 			cached.Warning = "Using cached data: " + err.Error()
 			return cached, nil
 		}
-		return &UpdateInfo{
+		info := &UpdateInfo{
 			CurrentVersion: s.currentVersion,
 			LatestVersion:  s.currentVersion,
 			HasUpdate:      false,
 			Warning:        err.Error(),
 			BuildType:      s.effectiveBuildType(),
-		}, nil
+		}
+		if s.isCustomBuild() {
+			info.CustomImage = s.customImage
+		}
+		return info, nil
 	}
 
 	// Cache result
@@ -163,21 +224,57 @@ func (s *UpdateService) CheckUpdate(ctx context.Context, force bool) (*UpdateInf
 
 // PerformUpdate downloads and applies the update
 // Uses atomic file replacement pattern for safe in-place updates
-func (s *UpdateService) PerformUpdate(ctx context.Context) error {
+func (s *UpdateService) PerformUpdate(ctx context.Context) (*UpdateExecutionResult, error) {
 	if s.isCustomBuild() {
-		return ErrCustomBuildOnlineUpdateDisabled
+		return s.performCustomContainerUpdate(ctx)
 	}
 
 	info, err := s.CheckUpdate(ctx, true)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if !info.HasUpdate {
-		return ErrNoUpdateAvailable
+		return nil, ErrNoUpdateAvailable
 	}
 
-	return s.applyReleaseAssets(ctx, info.ReleaseInfo.Assets)
+	if err := s.applyReleaseAssets(ctx, info.ReleaseInfo.Assets); err != nil {
+		return nil, err
+	}
+	return &UpdateExecutionResult{NeedRestart: true}, nil
+}
+
+func (s *UpdateService) performCustomContainerUpdate(ctx context.Context) (*UpdateExecutionResult, error) {
+	info, err := s.CheckUpdate(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	if !info.CustomUpdateAvailable {
+		if info.HasUpdate {
+			return nil, ErrCustomUpdateNotReady
+		}
+		return nil, ErrNoUpdateAvailable
+	}
+	if !s.updaterConfigured() {
+		return nil, ErrCustomUpdaterUnavailable
+	}
+	if !info.CustomUpdateReady {
+		return nil, ErrCustomUpdateNotReady
+	}
+
+	targetImage := latestImageReference(s.customImage)
+	triggerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), customUpdateTriggerTimeout)
+	defer cancel()
+	if err := s.updater.TriggerUpdate(triggerCtx); err != nil {
+		return nil, fmt.Errorf("trigger custom container update: %w", err)
+	}
+
+	return &UpdateExecutionResult{
+		NeedRestart:      false,
+		AutomaticRestart: true,
+		TargetVersion:    info.CustomVersion,
+		TargetImage:      targetImage,
+	}, nil
 }
 
 // applyReleaseAssets downloads the platform archive from the given release assets,
@@ -425,7 +522,7 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 		}
 	}
 
-	return &UpdateInfo{
+	info := &UpdateInfo{
 		CurrentVersion: s.currentVersion,
 		LatestVersion:  latestVersion,
 		HasUpdate:      compareVersions(s.currentVersion, latestVersion) < 0,
@@ -439,7 +536,158 @@ func (s *UpdateService) fetchLatestRelease(ctx context.Context) (*UpdateInfo, er
 		Cached:    false,
 		Warning:   s.customBuildWarning(),
 		BuildType: s.effectiveBuildType(),
-	}, nil
+	}
+	if s.isCustomBuild() {
+		s.enrichCustomUpdate(ctx, info)
+	}
+	return info, nil
+}
+
+func (s *UpdateService) enrichCustomUpdate(ctx context.Context, info *UpdateInfo) {
+	info.CustomImage = s.customImage
+	if s.tagClient == nil || s.customImage == "" {
+		info.CustomUpdateWarning = "custom container image discovery is not configured"
+		return
+	}
+
+	tags, err := s.tagClient.ListTags(ctx, s.customImage)
+	if err != nil {
+		info.CustomUpdateWarning = "failed to inspect custom container image: " + err.Error()
+		return
+	}
+
+	target, ok := selectHighestCustomPackage(tags, info.LatestVersion)
+	if !ok {
+		if compareVersions(s.currentVersion, info.LatestVersion) < 0 {
+			info.CustomUpdateWarning = fmt.Sprintf("waiting for custom container image matching %s", info.LatestVersion)
+		}
+		return
+	}
+
+	info.CustomVersion = target.Version
+	info.CustomReleaseURL = customReleaseURL(s.customRepo, target.Version)
+	info.CustomUpdateAvailable = compareCustomVersions(s.currentVersion, target.Version) < 0
+	info.HasUpdate = info.HasUpdate || info.CustomUpdateAvailable
+	if !info.CustomUpdateAvailable {
+		return
+	}
+
+	targetDigest, err := s.tagClient.ManifestDigest(ctx, s.customImage, target.Tag)
+	if err != nil {
+		info.CustomUpdateWarning = "failed to inspect exact custom container image: " + err.Error()
+		return
+	}
+	latestDigest, err := s.tagClient.ManifestDigest(ctx, s.customImage, "latest")
+	if err != nil {
+		info.CustomUpdateWarning = "failed to inspect custom container image latest tag: " + err.Error()
+		return
+	}
+	if !strings.EqualFold(strings.TrimSpace(targetDigest), strings.TrimSpace(latestDigest)) {
+		info.CustomUpdateWarning = fmt.Sprintf("custom container image latest tag does not yet match %s", target.Version)
+		return
+	}
+	if !s.updaterConfigured() {
+		info.CustomUpdateWarning = "custom container updater is not configured"
+		return
+	}
+	info.CustomUpdateReady = true
+}
+
+type customPackage struct {
+	Version string
+	Tag     string
+}
+
+func selectHighestCustomPackage(tags []string, upstreamVersion string) (customPackage, bool) {
+	targetCore := versionCore(upstreamVersion)
+	bestRevision := -1
+	best := customPackage{}
+	for _, tag := range tags {
+		core, revision, ok := parseCustomVersion(tag)
+		if !ok || core != targetCore || revision <= bestRevision {
+			continue
+		}
+		bestRevision = revision
+		best = customPackage{
+			Version: fmt.Sprintf("%s-xd.%d", core, revision),
+			Tag:     strings.TrimSpace(tag),
+		}
+	}
+	return best, best.Version != ""
+}
+
+func parseCustomVersion(value string) (string, int, bool) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	parts := strings.Split(value, "-xd.")
+	if len(parts) != 2 || !isStrictVersionCore(parts[0]) || parts[1] == "" {
+		return "", 0, false
+	}
+	revision, err := strconv.Atoi(parts[1])
+	if err != nil || revision < 0 || strconv.Itoa(revision) != parts[1] {
+		return "", 0, false
+	}
+	return parts[0], revision, true
+}
+
+func isStrictVersionCore(value string) bool {
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		if _, err := strconv.Atoi(part); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func compareCustomVersions(current, target string) int {
+	if coreComparison := compareVersions(current, target); coreComparison != 0 {
+		return coreComparison
+	}
+	_, currentRevision, currentOK := parseCustomVersion(current)
+	_, targetRevision, targetOK := parseCustomVersion(target)
+	if !targetOK {
+		return 0
+	}
+	if !currentOK {
+		currentRevision = -1
+	}
+	switch {
+	case currentRevision < targetRevision:
+		return -1
+	case currentRevision > targetRevision:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func versionCore(value string) string {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	if suffixIndex := strings.IndexAny(value, "-+"); suffixIndex >= 0 {
+		value = value[:suffixIndex]
+	}
+	return value
+}
+
+func customReleaseURL(repo, version string) string {
+	if strings.TrimSpace(repo) == "" || strings.TrimSpace(version) == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://github.com/%s/releases/tag/v%s", strings.Trim(repo, "/ "), version)
+}
+
+func latestImageReference(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.HasSuffix(image, ":latest") {
+		return image
+	}
+	return image + ":latest"
 }
 
 func (s *UpdateService) downloadFile(ctx context.Context, downloadURL, dest string) error {
@@ -610,9 +858,14 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 	}
 
 	var cached struct {
-		Latest      string       `json:"latest"`
-		ReleaseInfo *ReleaseInfo `json:"release_info"`
-		Timestamp   int64        `json:"timestamp"`
+		Latest              string       `json:"latest"`
+		ReleaseInfo         *ReleaseInfo `json:"release_info"`
+		CustomVersion       string       `json:"custom_version"`
+		CustomImage         string       `json:"custom_image"`
+		CustomReleaseURL    string       `json:"custom_release_url"`
+		CustomUpdateReady   bool         `json:"custom_update_ready"`
+		CustomUpdateWarning string       `json:"custom_update_warning"`
+		Timestamp           int64        `json:"timestamp"`
 	}
 	if err := json.Unmarshal([]byte(data), &cached); err != nil {
 		return nil, err
@@ -622,14 +875,21 @@ func (s *UpdateService) getFromCache(ctx context.Context) (*UpdateInfo, error) {
 		return nil, fmt.Errorf("cache expired")
 	}
 
+	customUpdateAvailable := cached.CustomVersion != "" && compareCustomVersions(s.currentVersion, cached.CustomVersion) < 0
 	return &UpdateInfo{
-		CurrentVersion: s.currentVersion,
-		LatestVersion:  cached.Latest,
-		HasUpdate:      compareVersions(s.currentVersion, cached.Latest) < 0,
-		ReleaseInfo:    cached.ReleaseInfo,
-		Cached:         true,
-		Warning:        s.customBuildWarning(),
-		BuildType:      s.effectiveBuildType(),
+		CurrentVersion:        s.currentVersion,
+		LatestVersion:         cached.Latest,
+		HasUpdate:             compareVersions(s.currentVersion, cached.Latest) < 0 || customUpdateAvailable,
+		ReleaseInfo:           cached.ReleaseInfo,
+		Cached:                true,
+		Warning:               s.customBuildWarning(),
+		BuildType:             s.effectiveBuildType(),
+		CustomVersion:         cached.CustomVersion,
+		CustomImage:           cached.CustomImage,
+		CustomReleaseURL:      cached.CustomReleaseURL,
+		CustomUpdateAvailable: customUpdateAvailable,
+		CustomUpdateReady:     customUpdateAvailable && cached.CustomUpdateReady && s.updaterConfigured(),
+		CustomUpdateWarning:   cached.CustomUpdateWarning,
 	}, nil
 }
 
@@ -649,18 +909,32 @@ func (s *UpdateService) customBuildWarning() string {
 	if !s.isCustomBuild() {
 		return ""
 	}
-	return "custom build detected; web one-click update is disabled because it would install the upstream official build"
+	return "custom build detected; web updates use the configured custom container image"
+}
+
+func (s *UpdateService) updaterConfigured() bool {
+	return s.updater != nil && s.updater.Configured()
 }
 
 func (s *UpdateService) saveToCache(ctx context.Context, info *UpdateInfo) {
 	cacheData := struct {
-		Latest      string       `json:"latest"`
-		ReleaseInfo *ReleaseInfo `json:"release_info"`
-		Timestamp   int64        `json:"timestamp"`
+		Latest              string       `json:"latest"`
+		ReleaseInfo         *ReleaseInfo `json:"release_info"`
+		CustomVersion       string       `json:"custom_version"`
+		CustomImage         string       `json:"custom_image"`
+		CustomReleaseURL    string       `json:"custom_release_url"`
+		CustomUpdateReady   bool         `json:"custom_update_ready"`
+		CustomUpdateWarning string       `json:"custom_update_warning"`
+		Timestamp           int64        `json:"timestamp"`
 	}{
-		Latest:      info.LatestVersion,
-		ReleaseInfo: info.ReleaseInfo,
-		Timestamp:   time.Now().Unix(),
+		Latest:              info.LatestVersion,
+		ReleaseInfo:         info.ReleaseInfo,
+		CustomVersion:       info.CustomVersion,
+		CustomImage:         info.CustomImage,
+		CustomReleaseURL:    info.CustomReleaseURL,
+		CustomUpdateReady:   info.CustomUpdateReady,
+		CustomUpdateWarning: info.CustomUpdateWarning,
+		Timestamp:           time.Now().Unix(),
 	}
 
 	data, _ := json.Marshal(cacheData)

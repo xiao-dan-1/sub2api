@@ -43,6 +43,12 @@ export const useAppStore = defineStore('app', () => {
   const hasUpdate = ref<boolean>(false)
   const buildType = ref<string>('source')
   const releaseInfo = ref<ReleaseInfo | null>(null)
+  const customVersion = ref<string>('')
+  const customImage = ref<string>('')
+  const customReleaseUrl = ref<string>('')
+  const customUpdateAvailable = ref<boolean>(false)
+  const customUpdateReady = ref<boolean>(false)
+  const customUpdateWarning = ref<string>('')
 
   // Auto-incrementing ID for toasts
   let toastIdCounter = 0
@@ -249,6 +255,12 @@ export const useAppStore = defineStore('app', () => {
         has_update: hasUpdate.value,
         build_type: buildType.value,
         release_info: releaseInfo.value || undefined,
+        custom_version: customVersion.value || undefined,
+        custom_image: customImage.value || undefined,
+        custom_release_url: customReleaseUrl.value || undefined,
+        custom_update_available: customUpdateAvailable.value,
+        custom_update_ready: customUpdateReady.value,
+        custom_update_warning: customUpdateWarning.value || undefined,
         cached: true
       }
     }
@@ -266,6 +278,12 @@ export const useAppStore = defineStore('app', () => {
       hasUpdate.value = data.has_update
       buildType.value = data.build_type || 'source'
       releaseInfo.value = data.release_info || null
+      customVersion.value = data.custom_version || ''
+      customImage.value = data.custom_image || ''
+      customReleaseUrl.value = data.custom_release_url || ''
+      customUpdateAvailable.value = data.custom_update_available ?? false
+      customUpdateReady.value = data.custom_update_ready ?? false
+      customUpdateWarning.value = data.custom_update_warning || ''
       versionLoaded.value = true
       return data
     } catch (error) {
@@ -282,6 +300,8 @@ export const useAppStore = defineStore('app', () => {
   function clearVersionCache(): void {
     versionLoaded.value = false
     hasUpdate.value = false
+    customUpdateAvailable.value = false
+    customUpdateReady.value = false
   }
 
   // ==================== Public Settings Management ====================
@@ -451,6 +471,12 @@ export const useAppStore = defineStore('app', () => {
     hasUpdate,
     buildType,
     releaseInfo,
+    customVersion,
+    customImage,
+    customReleaseUrl,
+    customUpdateAvailable,
+    customUpdateReady,
+    customUpdateWarning,
 
     // Computed
     hasActiveToasts,

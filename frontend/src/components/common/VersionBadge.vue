@@ -32,7 +32,7 @@
           v-if="dropdownOpen"
           ref="dropdownRef"
           class="absolute left-0 z-50 mt-2 overflow-hidden whitespace-normal rounded-xl border border-gray-200 bg-white shadow-lg transition-all duration-200 dark:border-dark-700 dark:bg-dark-800"
-          :class="rollbackPanelOpen && isReleaseBuild ? 'w-80' : 'w-64'"
+          :class="isCustomBuild || (rollbackPanelOpen && isReleaseBuild) ? 'w-80' : 'w-64'"
         >
           <!-- Header with refresh button -->
           <div
@@ -149,7 +149,49 @@
                 </button>
               </div>
 
-              <!-- Priority 2: Update success - need restart -->
+              <!-- Priority 2: Custom container is being replaced automatically -->
+              <div
+                v-else-if="automaticRestarting"
+                data-testid="custom-update-reconnecting"
+                class="space-y-2"
+              >
+                <div
+                  class="flex items-center gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800/50 dark:bg-blue-900/20"
+                >
+                  <svg
+                    class="h-5 w-5 flex-shrink-0 animate-spin text-blue-600 dark:text-blue-400"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      class="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      stroke-width="4"
+                    ></circle>
+                    <path
+                      class="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
+                  </svg>
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-medium text-blue-700 dark:text-blue-300">
+                      {{ t('version.containerRestarting') }}
+                    </p>
+                    <p class="break-all text-xs text-blue-600/70 dark:text-blue-400/70">
+                      v{{ automaticTargetVersion }}
+                    </p>
+                  </div>
+                </div>
+                <p class="px-1 text-center text-xs text-gray-500 dark:text-dark-400">
+                  {{ t('version.containerRestartHint') }}
+                </p>
+              </div>
+
+              <!-- Priority 3: Update success - need restart -->
               <div v-else-if="updateSuccess && needRestart" class="space-y-2">
                 <div
                   class="flex items-center gap-3 rounded-lg border border-green-200 bg-green-50 p-3 dark:border-green-800/50 dark:bg-green-900/20"
@@ -231,8 +273,107 @@
                 </button>
               </div>
 
-              <!-- Priority 3: Update available for source build - show git pull hint -->
-              <div v-else-if="hasUpdate && !isReleaseBuild" class="space-y-2">
+              <!-- Priority 4: Custom image update or build-waiting state -->
+              <div v-else-if="hasUpdate && isCustomBuild" class="space-y-2">
+                <div
+                  v-if="customUpdateReady"
+                  data-testid="custom-update-ready"
+                  class="space-y-2"
+                >
+                  <div
+                    class="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 dark:border-amber-800/50 dark:bg-amber-900/20"
+                  >
+                    <Icon
+                      name="download"
+                      size="sm"
+                      :stroke-width="2"
+                      class="mt-0.5 flex-shrink-0 text-amber-600 dark:text-amber-400"
+                    />
+                    <div class="min-w-0 flex-1">
+                      <p class="text-sm font-medium text-amber-700 dark:text-amber-300">
+                        {{ t('version.customUpdateReady') }}
+                      </p>
+                      <p class="mt-1 text-xs text-amber-600/80 dark:text-amber-400/80">
+                        {{ t('version.authorVersion') }}: v{{ latestVersion }}
+                      </p>
+                      <p class="break-all text-xs font-medium text-amber-700 dark:text-amber-300">
+                        {{ t('version.customTarget') }}: v{{ customVersion }}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    data-testid="custom-update-button"
+                    @click="handleUpdate"
+                    :disabled="updating"
+                    class="flex w-full items-center justify-center gap-2 rounded-lg bg-primary-500 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <svg
+                      v-if="updating"
+                      class="h-4 w-4 animate-spin"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                    >
+                      <circle
+                        class="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        stroke-width="4"
+                      ></circle>
+                      <path
+                        class="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      ></path>
+                    </svg>
+                    <Icon v-else name="download" size="sm" :stroke-width="2" />
+                    {{ updating ? t('version.updating') : t('version.updateCustomNow') }}
+                  </button>
+                </div>
+
+                <div
+                  v-else
+                  data-testid="custom-update-waiting"
+                  class="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-800/50 dark:bg-blue-900/20"
+                >
+                  <Icon
+                    name="clock"
+                    size="sm"
+                    :stroke-width="2"
+                    class="mt-0.5 flex-shrink-0 text-blue-600 dark:text-blue-400"
+                  />
+                  <div class="min-w-0 flex-1">
+                    <p class="text-sm font-medium text-blue-700 dark:text-blue-300">
+                      {{ t('version.customBuildPending') }}
+                    </p>
+                    <p class="mt-1 text-xs text-blue-600/80 dark:text-blue-400/80">
+                      {{ t('version.authorVersion') }}: v{{ latestVersion }}
+                    </p>
+                    <p
+                      v-if="customUpdateMessage"
+                      class="mt-1 break-words text-xs text-blue-600/70 dark:text-blue-400/70"
+                    >
+                      {{ customUpdateMessage }}
+                    </p>
+                  </div>
+                </div>
+
+                <a
+                  v-if="releaseInfo?.html_url && releaseInfo.html_url !== '#'"
+                  :href="releaseInfo.html_url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="flex items-center justify-center gap-1 text-xs text-gray-500 transition-colors hover:text-gray-700 dark:text-dark-400 dark:hover:text-dark-200"
+                >
+                  {{ t('version.viewChangelog') }}
+                  <Icon name="externalLink" size="xs" :stroke-width="2" />
+                </a>
+              </div>
+
+              <!-- Priority 5: Update available for source build - show git pull hint -->
+              <div v-else-if="hasUpdate && isSourceBuild" class="space-y-2">
                 <a
                   v-if="releaseInfo?.html_url && releaseInfo.html_url !== '#'"
                   :href="releaseInfo.html_url"
@@ -291,7 +432,7 @@
                 </div>
               </div>
 
-              <!-- Priority 4: Update available for release build - show update button -->
+              <!-- Priority 6: Update available for release build - show update button -->
               <div v-else-if="hasUpdate && isReleaseBuild" class="space-y-2">
                 <!-- Update info card -->
                 <div
@@ -355,7 +496,7 @@
                 </a>
               </div>
 
-              <!-- Priority 5: Up to date - GitHub link + version rollback -->
+              <!-- Priority 7: Up to date - GitHub link + version rollback -->
               <div v-else class="space-y-2">
                 <a
                   v-if="releaseInfo?.html_url && releaseInfo.html_url !== '#'"
@@ -642,6 +783,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore, useAppStore } from '@/stores'
 import {
+  getPublicVersion,
   performUpdate,
   restartService,
   getRollbackVersions,
@@ -654,6 +796,9 @@ import Icon from '@/components/icons/Icon.vue'
 const GITHUB_REPO = 'Wei-Shaw/sub2api'
 // Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
 const DOCKER_IMAGE = 'weishaw/sub2api'
+const CUSTOM_UPDATE_POLL_INITIAL_DELAY_MS = 1500
+const CUSTOM_UPDATE_POLL_INTERVAL_MS = 2000
+const CUSTOM_UPDATE_POLL_TIMEOUT_MS = 10 * 60 * 1000
 
 const { t } = useI18n()
 
@@ -676,6 +821,15 @@ const latestVersion = computed(() => appStore.latestVersion)
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
+const customVersion = computed(() => appStore.customVersion)
+const customUpdateReady = computed(() => appStore.customUpdateReady)
+const customUpdateWarning = computed(() => appStore.customUpdateWarning)
+const customUpdateMessage = computed(() => {
+  if (/^waiting for custom container image matching\b/i.test(customUpdateWarning.value)) {
+    return t('version.customBuildPendingHint')
+  }
+  return customUpdateWarning.value
+})
 
 // Update process states (local to this component)
 const updating = ref(false)
@@ -684,6 +838,9 @@ const needRestart = ref(false)
 const updateError = ref('')
 const updateSuccess = ref(false)
 const restartCountdown = ref(0)
+const automaticRestarting = ref(false)
+const automaticTargetVersion = ref('')
+let componentUnmounted = false
 // Distinguishes the success + restart panel between update and rollback flows
 const successKind = ref<'update' | 'rollback'>('update')
 
@@ -728,7 +885,9 @@ const activeManualCommand = computed(() =>
   manualTab.value === 'docker' ? dockerRollbackCommand.value : scriptRollbackCommand.value
 )
 
-// Only show update check for release builds (binary/docker deployment)
+const isCustomBuild = computed(() => buildType.value === 'custom')
+const isSourceBuild = computed(() => buildType.value === 'source')
+// Official release builds use the existing in-place binary updater.
 const isReleaseBuild = computed(() => buildType.value === 'release')
 
 function toggleDropdown() {
@@ -746,6 +905,8 @@ async function refreshVersion(force = true) {
   updateError.value = ''
   updateSuccess.value = false
   needRestart.value = false
+  automaticRestarting.value = false
+  automaticTargetVersion.value = ''
   resetRollbackState()
 
   await appStore.fetchVersion(force)
@@ -757,9 +918,22 @@ async function handleUpdate() {
   updating.value = true
   updateError.value = ''
   updateSuccess.value = false
+  automaticRestarting.value = false
+  automaticTargetVersion.value = ''
 
   try {
     const result = await performUpdate()
+    if (result.automatic_restart) {
+      const targetVersion = result.target_version || customVersion.value
+      if (!targetVersion) {
+        throw new Error(t('version.containerTargetMissing'))
+      }
+      automaticTargetVersion.value = targetVersion
+      automaticRestarting.value = true
+      appStore.clearVersionCache()
+      await waitForTargetVersion(targetVersion)
+      return
+    }
     successKind.value = 'update'
     updateSuccess.value = true
     needRestart.value = result.need_restart
@@ -767,10 +941,50 @@ async function handleUpdate() {
     appStore.clearVersionCache()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
-    updateError.value = err.response?.data?.message || err.message || t('version.updateFailed')
+    if (isCustomBuild.value && !err.response && customVersion.value && !automaticRestarting.value) {
+      automaticTargetVersion.value = customVersion.value
+      automaticRestarting.value = true
+      try {
+        await waitForTargetVersion(customVersion.value)
+        return
+      } catch (pollError: unknown) {
+        const polling = pollError as { message?: string }
+        updateError.value = polling.message || t('version.containerRestartTimeout')
+      }
+    } else {
+      updateError.value = err.response?.data?.message || err.message || t('version.updateFailed')
+    }
+    automaticRestarting.value = false
   } finally {
     updating.value = false
   }
+}
+
+async function waitForTargetVersion(targetVersion: string) {
+  const deadline = Date.now() + CUSTOM_UPDATE_POLL_TIMEOUT_MS
+
+  await new Promise((resolve) => setTimeout(resolve, CUSTOM_UPDATE_POLL_INITIAL_DELAY_MS))
+  while (!componentUnmounted && Date.now() < deadline) {
+    try {
+      const info = await getPublicVersion()
+      if (info.version === targetVersion) {
+        window.location.reload()
+        return
+      }
+    } catch {
+      // Temporary connection failures are expected while Docker replaces the container.
+    }
+
+    const remaining = deadline - Date.now()
+    if (remaining > 0 && !componentUnmounted) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(CUSTOM_UPDATE_POLL_INTERVAL_MS, remaining))
+      )
+    }
+  }
+
+  if (componentUnmounted) return
+  throw new Error(t('version.containerRestartTimeout'))
 }
 
 function resetRollbackState() {
@@ -918,6 +1132,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  componentUnmounted = true
   document.removeEventListener('click', handleClickOutside)
 })
 </script>

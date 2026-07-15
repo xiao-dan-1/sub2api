@@ -31,8 +31,20 @@ func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient)
 }
 
 // ProvideUpdateService creates UpdateService with BuildInfo
-func ProvideUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, buildInfo BuildInfo) *UpdateService {
-	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType)
+func ProvideUpdateService(
+	cache UpdateCache,
+	githubClient GitHubReleaseClient,
+	tagClient ContainerTagClient,
+	updater ContainerUpdater,
+	buildInfo BuildInfo,
+	cfg *config.Config,
+) *UpdateService {
+	return NewUpdateServiceWithOptions(cache, githubClient, buildInfo.Version, buildInfo.BuildType, UpdateServiceOptions{
+		CustomRepo:  cfg.Update.CustomRepo,
+		CustomImage: cfg.Update.CustomImage,
+		TagClient:   tagClient,
+		Updater:     updater,
+	})
 }
 
 // ProvideEmailQueueService creates EmailQueueService with default worker count

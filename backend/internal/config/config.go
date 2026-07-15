@@ -155,6 +155,14 @@ type UpdateConfig struct {
 	// 支持 http/https/socks5/socks5h 协议
 	// 例如: "http://127.0.0.1:7890", "socks5://127.0.0.1:1080"
 	ProxyURL string `mapstructure:"proxy_url"`
+	// CustomRepo is the private fork used to construct custom release links.
+	CustomRepo string `mapstructure:"custom_repo"`
+	// CustomImage is the untagged GHCR repository used for custom package discovery.
+	CustomImage string `mapstructure:"custom_image"`
+	// WatchtowerURL is the internal Watchtower HTTP update endpoint.
+	WatchtowerURL string `mapstructure:"watchtower_url"`
+	// WatchtowerToken authenticates requests to the Watchtower HTTP API.
+	WatchtowerToken string `mapstructure:"watchtower_token"`
 }
 
 type IdempotencyConfig struct {
@@ -1911,6 +1919,13 @@ func setDefaults() {
 	viper.SetDefault("pricing.fallback_file", "./resources/model-pricing/model_prices_and_context_window.json")
 	viper.SetDefault("pricing.update_interval_hours", 24)
 	viper.SetDefault("pricing.hash_check_interval_minutes", 10)
+
+	// Update. Register environment-only keys so Viper includes them during Unmarshal.
+	viper.SetDefault("update.proxy_url", "")
+	viper.SetDefault("update.custom_repo", "")
+	viper.SetDefault("update.custom_image", "")
+	viper.SetDefault("update.watchtower_url", "")
+	viper.SetDefault("update.watchtower_token", "")
 
 	// Timezone (default to Asia/Shanghai for Chinese users)
 	viper.SetDefault("timezone", "Asia/Shanghai")

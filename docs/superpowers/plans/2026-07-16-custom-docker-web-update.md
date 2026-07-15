@@ -4,7 +4,7 @@
 
 **Goal:** Make the Web update button preserve author release notifications while updating custom Docker deployments to `ghcr.io/xiao-dan-1/sub2api:latest` through an internal Watchtower sidecar.
 
-**Architecture:** The update service continues reading the author's latest GitHub Release and adds a GHCR tag client to resolve the matching highest `-xd.N` package. Custom updates are validated synchronously, then scheduled through a bearer-authenticated Watchtower client so the API can respond before the Sub2API container is recreated.
+**Architecture:** The update service continues reading the author's latest GitHub Release and adds a GHCR client to resolve the matching highest `-xd.N` package plus exact/`latest` manifest digests. Custom updates call a bearer-authenticated Watchtower client synchronously, while the frontend recovers from replacement interruptions through the public version endpoint. The tag dispatcher serializes missing package builds, Release gates on exact-ref CI/Security, and `latest` is repaired to the highest published custom tag.
 
 **Tech Stack:** Go, Gin, Wire, Docker Registry HTTP API V2, Watchtower HTTP API, Vue 3, Pinia, TypeScript, Vitest, Docker Compose.
 
@@ -67,9 +67,9 @@ go test ./internal/repository -run 'TestContainerRegistryTagClient' -count=1
 
 Expected: FAIL because the client does not exist.
 
-- [ ] **Step 3: Implement the client and confirm GREEN**
+- [ ] **Step 3: Implement tags and manifest digest lookup, then confirm GREEN**
 
-Use the existing proxy-aware HTTP client factory, restrict discovery to `ghcr.io`, cap the request at 100 tags, decode the Registry API `tags` array, and rerun the focused test.
+Use the existing proxy-aware HTTP client factory, restrict discovery to `ghcr.io`, paginate Registry API tags, and resolve `Docker-Content-Digest` with an authenticated manifest `HEAD`. Rerun the focused test.
 
 ### Task 3: Implement and test the Watchtower client
 
@@ -105,7 +105,7 @@ Use an internal HTTP client with a finite timeout and no environment proxy. Vali
 
 - [ ] **Step 1: Write failing scheduling tests**
 
-Use a channel-backed updater stub to prove a ready custom update returns immediately with:
+Use a blocking channel-backed updater stub to prove a ready custom update does not return before Watchtower accepts or rejects the request:
 
 ```go
 UpdateExecutionResult{
@@ -124,7 +124,7 @@ Expected: FAIL because `PerformUpdate` still returns only an error and rejects c
 
 - [ ] **Step 3: Implement custom scheduling**
 
-Keep the official binary updater synchronous. For custom builds, validate a forced check, return target metadata, and schedule `TriggerUpdate` with a detached timeout context after a short response grace period. Log background failures.
+Keep the official binary updater synchronous. For custom builds, validate a forced check and call `TriggerUpdate` synchronously with `context.WithoutCancel` plus a finite timeout. Return target metadata only after success and propagate Watchtower failures.
 
 - [ ] **Step 4: Update failing handler tests and implementation**
 
@@ -209,7 +209,7 @@ Add `isCustomBuild`, keep the author's Release link visible, show the exact cust
 
 - [ ] **Step 3: Poll for the target version**
 
-After `automatic_restart: true`, wait briefly and call the authenticated check-update API until `current_version === target_version`. Ignore temporary network errors during replacement, reload on success, and show a timeout error otherwise.
+After `automatic_restart: true` or an expected replacement connection interruption, wait briefly and call the public settings API until `version === target_version`. Ignore temporary network errors during replacement, reload on success, and show a timeout error otherwise.
 
 - [ ] **Step 4: Add Chinese and English labels, then confirm GREEN**
 
@@ -226,13 +226,19 @@ Run both focused Vitest commands and expect PASS.
 
 Set `ghcr.io/xiao-dan-1/sub2api:latest`, add the Watchtower enable label, and pass custom repo/image plus the internal endpoint/token to the app.
 
+Use the same `${UPDATE_CUSTOM_IMAGE}:latest` expression for the running container so Registry readiness and the image Watchtower updates cannot diverge.
+
 - [ ] **Step 2: Add the Watchtower sidecar**
 
 Use `containrrr/watchtower:1.7.1` with `--http-api-update`, `--label-enable`, and `--cleanup`. Mount `/var/run/docker.sock` only in Watchtower, join only `sub2api-network`, and publish no host port.
 
+Require a unique `WATCHTOWER_SCOPE`, pass it to `--scope`, and apply the matching scope label to both Sub2API and Watchtower.
+
+Set `DOCKER_API_VERSION=${WATCHTOWER_DOCKER_API_VERSION:-1.44}` for all Docker Engine 29 minors. Document `1.40` as the override for Engine 24 or older.
+
 - [ ] **Step 3: Document and set the token**
 
-Add `WATCHTOWER_HTTP_API_TOKEN` to `.env.example` and generate a random value in the ignored local `.env`.
+Keep `WATCHTOWER_HTTP_API_TOKEN` and `WATCHTOWER_SCOPE` empty in `.env.example`; generate a random token and unique scope in the ignored local `.env`.
 
 - [ ] **Step 4: Validate Compose**
 
@@ -243,7 +249,40 @@ docker compose -f docker-compose.local.yml config
 
 Expected: one Docker Socket mount owned by Watchtower, no Watchtower host port, matching API tokens, the custom image, and the app update label.
 
-### Task 9: Full verification and rendered QA
+### Task 9: Harden custom tag release automation
+
+**Files:**
+- Modify: `.github/workflows/auto-build-custom-tags.yml`
+- Modify: `.github/workflows/sync-upstream-custom-pack.yml`
+- Modify: `.github/workflows/release.yml`
+- Modify: `.github/workflows/backend-ci.yml`
+- Modify: `.github/workflows/security-scan.yml`
+
+- [ ] **Step 1: Make CI and Security reusable against an exact ref**
+
+Add `workflow_call.inputs.ref`, use that ref in every checkout, and exclude tag pushes from the ordinary push trigger so a Release does not duplicate the same gates.
+
+- [ ] **Step 2: Gate Release and use one source revision**
+
+Validate `vX.Y.Z-xd.N`, invoke both reusable workflows with the tag, make all build checkouts use that tag, narrow write permissions to publishing jobs, and serialize Release publication.
+
+- [ ] **Step 3: Turn the auto-builder into the common queue**
+
+For a create/manual event inspect that tag; for schedule-without-input scan every custom tag in version order. Dispatch one missing Release, identify it by `run-name`, wait for success, then continue. Afterward use `crane tag` to point `latest` at the highest published exact image and verify equal digests.
+
+- [ ] **Step 4: Delegate sync-generated tags to the queue**
+
+Remove direct Release dispatch and active-run polling from the sync workflow. After creating a tag, dispatch `auto-build-custom-tags.yml` with that exact tag. Accept a custom-suffixed VERSION when calculating the next base version.
+
+- [ ] **Step 5: Validate workflow syntax**
+
+```bash
+docker run --rm -v "${PWD}:/repo" -w /repo rhysd/actionlint:latest
+```
+
+Expected: exit 0 with no findings.
+
+### Task 10: Full verification and rendered QA
 
 **Files:**
 - No additional production files expected.
@@ -281,7 +320,7 @@ Expected: Sub2API, Watchtower, PostgreSQL, and Redis are running.
 
 Exercise desktop and mobile widths, ready/waiting states, interaction behavior, console output, and layout overlap.
 
-### Task 10: Publish the fixed custom package
+### Task 11: Publish the fixed custom package
 
 **Files:**
 - Commit tracked implementation and documentation files; never add `deploy/.env` or `deploy/recovery_backups/`.
@@ -297,7 +336,7 @@ git diff --stat
 - [ ] **Step 2: Commit and push `custom`**
 
 ```bash
-git add docs/superpowers/specs/2026-07-16-custom-docker-web-update-design.md docs/superpowers/plans/2026-07-16-custom-docker-web-update.md backend/internal/config/config.go backend/internal/service/update_service.go backend/internal/service/update_service_test.go backend/internal/service/wire.go backend/internal/repository/container_registry_tags.go backend/internal/repository/container_registry_tags_test.go backend/internal/repository/watchtower_client.go backend/internal/repository/watchtower_client_test.go backend/internal/repository/wire.go backend/internal/handler/admin/system_handler.go backend/internal/handler/admin/system_handler_test.go backend/cmd/server/wire_gen.go frontend/src/api/admin/system.ts frontend/src/stores/app.ts frontend/src/stores/__tests__/app.spec.ts frontend/src/components/common/VersionBadge.vue frontend/src/components/common/__tests__/VersionBadge.custom-update.spec.ts frontend/src/i18n/locales/zh/misc.ts frontend/src/i18n/locales/en/misc.ts deploy/config.example.yaml deploy/docker-compose.local.yml deploy/.env.example
+git add .github/workflows/auto-build-custom-tags.yml .github/workflows/backend-ci.yml .github/workflows/release.yml .github/workflows/security-scan.yml .github/workflows/sync-upstream-custom-pack.yml docs/superpowers/specs/2026-07-16-custom-docker-web-update-design.md docs/superpowers/plans/2026-07-16-custom-docker-web-update.md backend/internal/config/config.go backend/internal/config/config_test.go backend/internal/service/update_service.go backend/internal/service/update_service_test.go backend/internal/service/wire.go backend/internal/repository/container_registry_tags.go backend/internal/repository/container_registry_tags_test.go backend/internal/repository/watchtower_client.go backend/internal/repository/watchtower_client_test.go backend/internal/repository/wire.go backend/internal/handler/admin/system_handler.go backend/internal/handler/admin/system_handler_test.go backend/cmd/server/wire_gen.go frontend/src/api/admin/system.ts frontend/src/stores/app.ts frontend/src/stores/__tests__/app.spec.ts frontend/src/components/common/VersionBadge.vue frontend/src/components/common/__tests__/VersionBadge.custom-update.spec.ts frontend/src/i18n/locales/zh/misc.ts frontend/src/i18n/locales/en/misc.ts deploy/config.example.yaml deploy/docker-compose.local.yml deploy/.env.example
 git commit -m "feat: update custom Docker image from web"
 git push origin custom
 ```

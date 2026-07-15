@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/stores/app'
 import { getPublicSettings } from '@/api/auth'
+import { checkUpdates } from '@/api/admin/system'
 import type { PublicSettings } from '@/types'
 
 function createDeferred<T>() {
@@ -75,6 +76,7 @@ describe('useAppStore', () => {
     vi.useFakeTimers()
     localStorage.clear()
     vi.mocked(getPublicSettings).mockReset()
+    vi.mocked(checkUpdates).mockReset()
     // 清除 window.__APP_CONFIG__
     delete (window as any).__APP_CONFIG__
   })
@@ -469,6 +471,45 @@ describe('useAppStore', () => {
       expect((window as any).__APP_CONFIG__.table_page_size_options).toEqual([20, 100, 1000])
       expect(localStorage.getItem('table-page-size')).toBeNull()
       expect(localStorage.getItem('table-page-size-source')).toBeNull()
+    })
+  })
+
+  describe('Version management', () => {
+    it('stores and returns custom container update metadata from cache', async () => {
+      vi.mocked(checkUpdates).mockResolvedValue({
+        current_version: '0.1.156-xd.4',
+        latest_version: '0.1.156',
+        has_update: true,
+        build_type: 'custom',
+        cached: false,
+        custom_version: '0.1.156-xd.5',
+        custom_image: 'ghcr.io/xiao-dan-1/sub2api',
+        custom_release_url:
+          'https://github.com/xiao-dan-1/sub2api/releases/tag/v0.1.156-xd.5',
+        custom_update_available: true,
+        custom_update_ready: true,
+        custom_update_warning: ''
+      })
+      const store = useAppStore()
+
+      await store.fetchVersion(true)
+      const cached = await store.fetchVersion(false)
+
+      expect(checkUpdates).toHaveBeenCalledTimes(1)
+      expect(store.customVersion).toBe('0.1.156-xd.5')
+      expect(store.customImage).toBe('ghcr.io/xiao-dan-1/sub2api')
+      expect(store.customUpdateAvailable).toBe(true)
+      expect(store.customUpdateReady).toBe(true)
+      expect(cached).toMatchObject({
+        custom_version: '0.1.156-xd.5',
+        custom_update_available: true,
+        custom_update_ready: true
+      })
+
+      store.clearVersionCache()
+
+      expect(store.customUpdateAvailable).toBe(false)
+      expect(store.customUpdateReady).toBe(false)
     })
   })
 })

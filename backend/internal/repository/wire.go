@@ -31,6 +31,16 @@ func ProvideGitHubReleaseClient(cfg *config.Config) service.GitHubReleaseClient 
 	return NewGitHubReleaseClient(cfg.Update.ProxyURL, cfg.Security.ProxyFallback.AllowDirectOnError)
 }
 
+// ProvideContainerTagClient creates the GHCR tag discovery client.
+func ProvideContainerTagClient(cfg *config.Config) service.ContainerTagClient {
+	return NewContainerRegistryTagClient(cfg.Update.ProxyURL, cfg.Security.ProxyFallback.AllowDirectOnError)
+}
+
+// ProvideContainerUpdater creates the internal Watchtower API client.
+func ProvideContainerUpdater(cfg *config.Config) service.ContainerUpdater {
+	return NewWatchtowerClient(cfg.Update.WatchtowerURL, cfg.Update.WatchtowerToken)
+}
+
 // ProvidePricingRemoteClient 创建定价数据远程客户端
 // 从配置中读取代理设置，支持国内服务器通过代理访问 GitHub 上的定价数据
 func ProvidePricingRemoteClient(cfg *config.Config) service.PricingRemoteClient {
@@ -140,6 +150,8 @@ var ProviderSet = wire.NewSet(
 	NewTurnstileVerifier,
 	ProvidePricingRemoteClient,
 	ProvideGitHubReleaseClient,
+	ProvideContainerTagClient,
+	ProvideContainerUpdater,
 	NewProxyExitInfoProber,
 	NewClaudeUsageFetcher,
 	NewClaudeOAuthClient,

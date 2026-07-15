@@ -43,7 +43,6 @@ concurrency:
 permissions:
   contents: write
   actions: write
-  packages: read
 
 jobs:
   sync-and-release:
@@ -192,9 +191,10 @@ jobs:
           git checkout "$CUSTOM_BRANCH"
           git fetch origin --tags --force
 
-          version="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
+          raw_version="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
+          version="${raw_version%%-*}"
           if ! [[ "$version" =~ ^[0-9]+(\.[0-9]+){2}$ ]]; then
-            echo "Expected upstream base VERSION like 0.1.156, got: $version" >&2
+            echo "Expected VERSION like 0.1.156 or 0.1.156-${TAG_SUFFIX}.N, got: $raw_version" >&2
             exit 1
           fi
 
@@ -218,36 +218,8 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Check for active Release workflow runs
-        id: active_release
+      - name: Dispatch custom tag builder
         if: steps.tag.outputs.tag != ''
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          total=0
-          for status in queued in_progress waiting pending requested; do
-            count="$(gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow release.yml \
-              --status "$status" \
-              --limit 20 \
-              --json databaseId \
-              --jq 'length')"
-            echo "Release runs with status ${status}: ${count}"
-            total=$((total + count))
-          done
-
-          if [ "$total" -gt 0 ]; then
-            echo "active=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "active=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Dispatch Release workflow
-        if: steps.tag.outputs.tag != '' && steps.active_release.outputs.active == 'false'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -255,11 +227,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh workflow run release.yml \
+          gh workflow run auto-build-custom-tags.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref "$CUSTOM_BRANCH" \
-            -f "tag=${TAG}" \
-            -f "simple_release=true"
+            -f "tag=${TAG}"
 
       - name: Summary
         if: always()
@@ -274,5 +245,5 @@ jobs:
             printf -- "- Mirror changed: \`%s\`\n" "${{ steps.mirror.outputs.changed || '' }}"
             printf -- "- Custom changed: \`%s\`\n" "${{ steps.custom.outputs.changed || '' }}"
             printf -- "- Created tag: \`%s\`\n" "${{ steps.tag.outputs.tag || '' }}"
-            printf -- "- Release active: \`%s\`\n" "${{ steps.active_release.outputs.active || '' }}"
+            printf -- "- Builder dispatched: \`%s\`\n" "${{ steps.tag.outputs.tag != '' }}"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -12,7 +12,13 @@ vi.mock('../client', () => ({
   },
 }))
 
-import { getRollbackVersions, rollback, type RollbackVersionInfo } from '@/api/admin/system'
+import {
+  getPublicVersion,
+  getRollbackVersions,
+  performUpdate,
+  rollback,
+  type RollbackVersionInfo
+} from '@/api/admin/system'
 
 describe('admin system rollback API', () => {
   beforeEach(() => {
@@ -51,5 +57,22 @@ describe('admin system rollback API', () => {
     await rollback()
 
     expect(post).toHaveBeenCalledWith('/admin/system/rollback', undefined)
+  })
+
+  it('allows the custom container update request to outlive the default API timeout', async () => {
+    post.mockResolvedValue({ data: { message: 'accepted', need_restart: false } })
+
+    await performUpdate()
+
+    expect(post).toHaveBeenCalledWith('/admin/system/update', undefined, { timeout: 660_000 })
+  })
+
+  it('polls the public version endpoint with a bounded request timeout', async () => {
+    get.mockResolvedValue({ data: { version: '0.1.156-xd.5' } })
+
+    const result = await getPublicVersion()
+
+    expect(get).toHaveBeenCalledWith('/settings/public', { timeout: 5_000 })
+    expect(result.version).toBe('0.1.156-xd.5')
   })
 })
