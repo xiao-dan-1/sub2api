@@ -145,7 +145,11 @@ describe('admin custom image update API', () => {
 
   it('distinguishes expected replacement disconnects from API responses', () => {
     expect(isExpectedContainerReplacementError({ status: 0, message: 'Network error' })).toBe(true)
-    expect(isExpectedContainerReplacementError({ message: 'Network error' })).toBe(true)
+    expect(
+      isExpectedContainerReplacementError({ code: 'ERR_NETWORK', message: 'Network error' })
+    ).toBe(true)
+    expect(isExpectedContainerReplacementError(new Error('application bug'))).toBe(false)
+    expect(isExpectedContainerReplacementError({ message: 'application bug' })).toBe(false)
     expect(isExpectedContainerReplacementError({ status: 409, code: 'CUSTOM_UPDATE_NOT_READY' })).toBe(
       false
     )

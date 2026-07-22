@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url'
 
 export function normalizeConflictPaths(paths) {
   return [...new Set(paths.map((path) => path.trim()).filter(Boolean))].sort((a, b) =>
-    a.localeCompare(b, 'en')
+    a < b ? -1 : a > b ? 1 : 0
   )
 }
 

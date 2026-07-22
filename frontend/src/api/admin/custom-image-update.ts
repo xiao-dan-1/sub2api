@@ -111,16 +111,16 @@ export function isExpectedContainerReplacementError(error: unknown): boolean {
   }
   const candidate = error as {
     status?: number
+    code?: string
     response?: unknown
-    message?: string
   }
-  if (candidate.response) {
+  if (candidate.response !== undefined && candidate.response !== null) {
     return false
   }
   if (candidate.status !== undefined) {
     return candidate.status === 0
   }
-  return typeof candidate.message === 'string' && candidate.message.length > 0
+  return candidate.code === 'ERR_NETWORK'
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<boolean> {

@@ -20,6 +20,14 @@ describe('sync conflict path signatures', () => {
     )
   })
 
+  it('sorts paths by deterministic code-unit order', () => {
+    assert.deepEqual(normalizeConflictPaths(['a-path', '_path', 'Z-path']), [
+      'Z-path',
+      '_path',
+      'a-path'
+    ])
+  })
+
   it('produces the same incident signature for the same path set in a different order', () => {
     const first = conflictPathSignature([
       'backend/internal/config/config_test.go',
