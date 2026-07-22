@@ -33,8 +33,9 @@ on:
       - custom
     paths:
       - '.github/workflows/sync-upstream-custom-pack.yml'
+      - '.github/scripts/sync-conflict-signature.mjs'
   schedule:
-    - cron: '7,22,37,52 * * * *'
+    - cron: '7 * * * *'
 
 concurrency:
   group: sync-upstream-custom-pack
@@ -43,6 +44,7 @@ concurrency:
 permissions:
   contents: write
   actions: write
+  issues: write
 
 jobs:
   sync-and-release:
@@ -144,6 +146,7 @@ jobs:
         env:
           CUSTOM_SHA: ${{ steps.fetch.outputs.custom_sha }}
           UPSTREAM_SHA: ${{ steps.fetch.outputs.upstream_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -155,16 +158,138 @@ jobs:
           set -e
 
           if [ "$merge_status" -ne 0 ]; then
-            conflicted="$(git diff --name-only --diff-filter=U)"
-            if [ "$conflicted" = "backend/cmd/server/VERSION" ]; then
+            mapfile -t conflict_paths < <(
+              git diff --name-only --diff-filter=U | sed '/^[[:space:]]*$/d' | LC_ALL=C sort -u
+            )
+            if [ "${#conflict_paths[@]}" -eq 0 ]; then
+              echo 'Merge failed without unresolved paths; refusing to classify it as a sync conflict.' >&2
+              git status --short >&2
+              exit 1
+            elif [ "${#conflict_paths[@]}" -eq 1 ] && [ "${conflict_paths[0]}" = "backend/cmd/server/VERSION" ]; then
               echo "Only VERSION conflicted; taking upstream base version before custom release tagging."
               git checkout --theirs backend/cmd/server/VERSION
               git add backend/cmd/server/VERSION
               git commit --no-edit
             else
-              echo "Merge conflicts require manual resolution:" >&2
-              echo "$conflicted" >&2
-              git status --short >&2
+              signature="$(printf '%s\n' "${conflict_paths[@]}" | node .github/scripts/sync-conflict-signature.mjs)"
+              merge_base="$(git merge-base "$CUSTOM_SHA" "$UPSTREAM_SHA")"
+              workflow_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              body_file="$(mktemp)"
+              {
+                printf '<!-- sync-conflict-signature: %s -->\n' "$signature"
+                echo '# Upstream sync conflict'
+                echo
+                echo 'The scheduled mirror succeeded, but the custom branch needs a semantic merge.'
+                echo
+                printf -- '- Custom branch: `%s`\n' "$CUSTOM_BRANCH"
+                printf -- '- Custom SHA: `%s`\n' "$CUSTOM_SHA"
+                printf -- '- Latest upstream SHA: `%s`\n' "$UPSTREAM_SHA"
+                printf -- '- Merge base: `%s`\n' "$merge_base"
+                printf -- '- Conflict signature: `%s`\n' "$signature"
+                printf -- '- Workflow run: %s\n' "$workflow_url"
+                echo
+                echo '## Conflicted paths'
+                echo
+                printf -- '- `%s`\n' "${conflict_paths[@]}"
+                echo
+                echo '## Reproduce'
+                echo
+                echo '```bash'
+                printf 'git fetch origin %q %q\n' "$MIRROR_BRANCH" "$CUSTOM_BRANCH"
+                printf 'git checkout %q\n' "$CUSTOM_BRANCH"
+                printf 'git merge %q\n' "$UPSTREAM_SHA"
+                echo '```'
+                echo
+                echo 'Unknown source conflicts are intentionally never auto-resolved.'
+              } > "$body_file"
+
+              gh label create sync-conflict \
+                --repo "$GITHUB_REPOSITORY" \
+                --color B60205 \
+                --description 'Upstream cannot be merged into the custom branch automatically' \
+                --force
+
+              mapfile -t open_issues < <(
+                gh issue list \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --state open \
+                  --label sync-conflict \
+                  --limit 100 \
+                  --json number \
+                  --jq '.[].number'
+              )
+              issue_number="${open_issues[0]:-}"
+              if [ "${#open_issues[@]}" -gt 1 ]; then
+                for duplicate in "${open_issues[@]:1}"; do
+                  gh issue close "$duplicate" \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --comment "Closing duplicate sync-conflict incident; tracking continues in #${issue_number}."
+                done
+              fi
+
+              if [ -z "$issue_number" ]; then
+                issue_url="$(gh issue create \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --title "[sync-conflict] ${UPSTREAM_BRANCH} -> ${CUSTOM_BRANCH}" \
+                  --label sync-conflict \
+                  --body-file "$body_file")"
+                issue_number="${issue_url##*/}"
+                echo "Created sync conflict issue #${issue_number}." >&2
+                {
+                  echo "issue_number=${issue_number}"
+                  echo "conflict_signature=${signature}"
+                  echo "conflict_repeated=false"
+                  echo "merged=false"
+                } >> "$GITHUB_OUTPUT"
+                git merge --abort || true
+                exit 1
+              fi
+
+              current_body="$(gh issue view "$issue_number" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+              current_signature="$(
+                printf '%s\n' "$current_body" |
+                  sed -nE 's/.*sync-conflict-signature: ([a-f0-9]{64}).*/\1/p' |
+                  head -n 1
+              )"
+              incident_kind="$(
+                node .github/scripts/sync-conflict-signature.mjs \
+                  --classify "$current_signature" "$signature"
+              )"
+              gh issue edit "$issue_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "[sync-conflict] ${UPSTREAM_BRANCH} -> ${CUSTOM_BRANCH}" \
+                --body-file "$body_file"
+
+              {
+                echo "issue_number=${issue_number}"
+                echo "conflict_signature=${signature}"
+                echo "merged=false"
+              } >> "$GITHUB_OUTPUT"
+
+              if [ "$incident_kind" = "repeated" ]; then
+                echo "Repeated conflict incident #${issue_number}; updated upstream SHA without another failure."
+                {
+                  echo "conflict_repeated=true"
+                  echo "changed=false"
+                  echo "sha=${CUSTOM_SHA}"
+                } >> "$GITHUB_OUTPUT"
+                {
+                  echo '### Repeated conflict suppressed'
+                  echo
+                  printf -- '- Tracking issue: #%s\n' "$issue_number"
+                  printf -- '- Conflict signature: `%s`\n' "$signature"
+                  printf -- '- Latest upstream SHA: `%s`\n' "$UPSTREAM_SHA"
+                } >> "$GITHUB_STEP_SUMMARY"
+                git merge --abort || true
+                exit 0
+              fi
+
+              gh issue comment "$issue_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --body "Conflict path set changed; this run fails once for the new incident signature ${signature}."
+              echo "Conflict path set changed; updated issue #${issue_number}." >&2
+              echo "conflict_repeated=false" >> "$GITHUB_OUTPUT"
+              git merge --abort || true
               exit 1
             fi
           fi
@@ -174,12 +299,14 @@ jobs:
             echo "Custom branch already contains mirrored upstream."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "sha=${new_custom_sha}" >> "$GITHUB_OUTPUT"
+            echo "merged=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git push origin "HEAD:refs/heads/${CUSTOM_BRANCH}"
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "sha=${new_custom_sha}" >> "$GITHUB_OUTPUT"
+          echo "merged=true" >> "$GITHUB_OUTPUT"
 
       - name: Create next custom tag
         id: tag
@@ -218,6 +345,32 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Close resolved sync conflict issue
+        if: steps.custom.outputs.merged == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CUSTOM_SHA: ${{ steps.custom.outputs.sha }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t open_issues < <(
+            gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --label sync-conflict \
+              --limit 100 \
+              --json number \
+              --jq '.[].number'
+          )
+          for issue_number in "${open_issues[@]}"; do
+            tag_note="${RELEASE_TAG:-not created}"
+            gh issue close "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --comment "Resolved by custom SHA ${CUSTOM_SHA}; release tag: ${tag_note}."
+          done
+
       - name: Dispatch custom tag builder
         if: steps.tag.outputs.tag != ''
         shell: bash
@@ -244,6 +397,8 @@ jobs:
             printf -- "- Custom branch: \`%s\`\n" "$CUSTOM_BRANCH"
             printf -- "- Mirror changed: \`%s\`\n" "${{ steps.mirror.outputs.changed || '' }}"
             printf -- "- Custom changed: \`%s\`\n" "${{ steps.custom.outputs.changed || '' }}"
+            printf -- "- Repeated conflict suppressed: \`%s\`\n" "${{ steps.custom.outputs.conflict_repeated || 'false' }}"
+            printf -- "- Conflict issue: \`%s\`\n" "${{ steps.custom.outputs.issue_number || '' }}"
             printf -- "- Created tag: \`%s\`\n" "${{ steps.tag.outputs.tag || '' }}"
             printf -- "- Builder dispatched: \`%s\`\n" "${{ steps.tag.outputs.tag != '' }}"
           } >> "$GITHUB_STEP_SUMMARY"
