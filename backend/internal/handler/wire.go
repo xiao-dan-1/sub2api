@@ -29,6 +29,7 @@ func ProvideAdminHandlers(
 	settingHandler *admin.SettingHandler,
 	opsHandler *admin.OpsHandler,
 	systemHandler *admin.SystemHandler,
+	customImageUpdateHandler *admin.CustomImageUpdateHandler,
 	subscriptionHandler *admin.SubscriptionHandler,
 	usageHandler *admin.UsageHandler,
 	userAttributeHandler *admin.UserAttributeHandler,
@@ -67,6 +68,7 @@ func ProvideAdminHandlers(
 		Setting:                settingHandler,
 		Ops:                    opsHandler,
 		System:                 systemHandler,
+		CustomImageUpdate:      customImageUpdateHandler,
 		Subscription:           subscriptionHandler,
 		Usage:                  usageHandler,
 		UserAttribute:          userAttributeHandler,
@@ -145,6 +147,14 @@ func ProvideBatchImageHandler(
 // ProvideSystemHandler creates admin.SystemHandler with UpdateService
 func ProvideSystemHandler(updateService *service.UpdateService, lockService *service.SystemOperationLockService) *admin.SystemHandler {
 	return admin.NewSystemHandler(updateService, lockService)
+}
+
+// ProvideCustomImageUpdateHandler creates the isolated custom image handler.
+func ProvideCustomImageUpdateHandler(
+	updateService *service.CustomImageUpdateService,
+	lockService *service.SystemOperationLockService,
+) *admin.CustomImageUpdateHandler {
+	return admin.NewCustomImageUpdateHandler(updateService, lockService)
 }
 
 // ProvideSettingHandler creates SettingHandler with version from BuildInfo
@@ -247,6 +257,7 @@ var ProviderSet = wire.NewSet(
 	ProvideAdminSettingHandler,
 	admin.NewOpsHandler,
 	ProvideSystemHandler,
+	ProvideCustomImageUpdateHandler,
 	admin.NewSubscriptionHandler,
 	admin.NewUsageHandler,
 	admin.NewUserAttributeHandler,

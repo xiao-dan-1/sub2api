@@ -25,6 +25,7 @@ type AdminHandlers struct {
 	Setting                *admin.SettingHandler
 	Ops                    *admin.OpsHandler
 	System                 *admin.SystemHandler
+	CustomImageUpdate      *admin.CustomImageUpdateHandler
 	Subscription           *admin.SubscriptionHandler
 	Usage                  *admin.UsageHandler
 	UserAttribute          *admin.UserAttributeHandler

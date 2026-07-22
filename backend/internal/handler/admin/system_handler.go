@@ -24,7 +24,7 @@ type SystemHandler struct {
 
 type systemUpdateService interface {
 	CheckUpdate(ctx context.Context, force bool) (*service.UpdateInfo, error)
-	PerformUpdate(ctx context.Context) (*service.UpdateExecutionResult, error)
+	PerformUpdate(ctx context.Context) error
 	Rollback() error
 	ListRollbackVersions(ctx context.Context) ([]service.RollbackVersion, error)
 	RollbackToVersion(ctx context.Context, version string) error
@@ -75,8 +75,7 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 			release(releaseReason, succeeded)
 		}()
 
-		result, err := h.updateSvc.PerformUpdate(ctx)
-		if err != nil {
+		if err := h.updateSvc.PerformUpdate(ctx); err != nil {
 			if errors.Is(err, service.ErrNoUpdateAvailable) {
 				info, checkErr := h.updateSvc.CheckUpdate(ctx, false)
 				if checkErr != nil {
@@ -96,21 +95,11 @@ func (h *SystemHandler) PerformUpdate(c *gin.Context) {
 			return nil, err
 		}
 		succeeded = true
-		if result == nil {
-			result = &service.UpdateExecutionResult{NeedRestart: true}
-		}
-		message := "Update completed. Please restart the service."
-		if result.AutomaticRestart {
-			message = "Container update scheduled. The service will restart automatically."
-		}
 
 		return gin.H{
-			"message":           message,
-			"need_restart":      result.NeedRestart,
-			"automatic_restart": result.AutomaticRestart,
-			"target_version":    result.TargetVersion,
-			"target_image":      result.TargetImage,
-			"operation_id":      lock.OperationID(),
+			"message":      "Update completed. Please restart the service.",
+			"need_restart": true,
+			"operation_id": lock.OperationID(),
 		}, nil
 	})
 }

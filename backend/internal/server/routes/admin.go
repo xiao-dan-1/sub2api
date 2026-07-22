@@ -605,6 +605,12 @@ func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		system.POST("/update", h.Admin.System.PerformUpdate)
 		system.POST("/rollback", h.Admin.System.Rollback)
 		system.POST("/restart", h.Admin.System.RestartService)
+
+		customImage := system.Group("/custom-image")
+		{
+			customImage.GET("/check", h.Admin.CustomImageUpdate.Check)
+			customImage.POST("/update", h.Admin.CustomImageUpdate.PerformUpdate)
+		}
 	}
 }
 

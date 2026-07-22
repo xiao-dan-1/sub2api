@@ -39,6 +39,21 @@ func ProvideUpdateService(
 	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType)
 }
 
+// ProvideCustomImageUpdateService creates the isolated fork image updater.
+func ProvideCustomImageUpdateService(
+	tagClient ContainerTagClient,
+	updater ContainerUpdater,
+	buildInfo BuildInfo,
+	cfg *config.Config,
+) *CustomImageUpdateService {
+	return NewCustomImageUpdateService(buildInfo.Version, CustomImageUpdateServiceOptions{
+		CustomRepo:  cfg.Update.CustomRepo,
+		CustomImage: cfg.Update.CustomImage,
+		TagClient:   tagClient,
+		Updater:     updater,
+	})
+}
+
 // ProvideEmailQueueService creates EmailQueueService with default worker count
 func ProvideEmailQueueService(emailService *EmailService) *EmailQueueService {
 	return NewEmailQueueService(emailService, 3)
@@ -739,6 +754,7 @@ var ProviderSet = wire.NewSet(
 	NewIdentityService,
 	NewCRSSyncService,
 	ProvideUpdateService,
+	ProvideCustomImageUpdateService,
 	ProvideTokenRefreshService,
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
 	ProvideAccountExpiryService,

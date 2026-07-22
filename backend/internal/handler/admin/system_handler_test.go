@@ -19,7 +19,6 @@ import (
 
 type systemHandlerUpdateServiceStub struct {
 	performErr           error
-	performResult        *service.UpdateExecutionResult
 	updateInfo           *service.UpdateInfo
 	checkErr             error
 	checkForces          []bool
@@ -38,9 +37,9 @@ func (s *systemHandlerUpdateServiceStub) CheckUpdate(_ context.Context, force bo
 	return s.updateInfo, s.checkErr
 }
 
-func (s *systemHandlerUpdateServiceStub) PerformUpdate(context.Context) (*service.UpdateExecutionResult, error) {
+func (s *systemHandlerUpdateServiceStub) PerformUpdate(context.Context) error {
 	s.performCall++
-	return s.performResult, s.performErr
+	return s.performErr
 }
 
 func (s *systemHandlerUpdateServiceStub) Rollback() error {
@@ -63,15 +62,11 @@ type systemUpdateResponseEnvelope struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    struct {
-		Message          string `json:"message"`
-		AlreadyUpToDate  bool   `json:"already_up_to_date"`
-		CurrentVersion   string `json:"current_version"`
-		LatestVersion    string `json:"latest_version"`
-		OperationID      string `json:"operation_id"`
-		NeedRestart      bool   `json:"need_restart"`
-		AutomaticRestart bool   `json:"automatic_restart"`
-		TargetVersion    string `json:"target_version"`
-		TargetImage      string `json:"target_image"`
+		Message         string `json:"message"`
+		AlreadyUpToDate bool   `json:"already_up_to_date"`
+		CurrentVersion  string `json:"current_version"`
+		LatestVersion   string `json:"latest_version"`
+		OperationID     string `json:"operation_id"`
 	} `json:"data"`
 }
 
@@ -168,52 +163,6 @@ func TestSystemHandlerPerformUpdateFailureStillReturnsInternalError(t *testing.T
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, http.StatusInternalServerError, body.Code)
 	require.Equal(t, "internal error", body.Message)
-}
-
-func TestSystemHandlerPerformUpdateReturnsManualRestartMetadata(t *testing.T) {
-	updateSvc := &systemHandlerUpdateServiceStub{
-		performResult: &service.UpdateExecutionResult{NeedRestart: true},
-	}
-	repo := newMemoryIdempotencyRepoStub()
-	router := newSystemHandlerTestRouter(t, updateSvc, repo)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/system/update", nil)
-	req.Header.Set("Idempotency-Key", "manual-restart")
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	var body systemUpdateResponseEnvelope
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	require.True(t, body.Data.NeedRestart)
-	require.False(t, body.Data.AutomaticRestart)
-	require.Empty(t, body.Data.TargetVersion)
-	require.Empty(t, body.Data.TargetImage)
-}
-
-func TestSystemHandlerPerformUpdateReturnsAutomaticRestartMetadata(t *testing.T) {
-	updateSvc := &systemHandlerUpdateServiceStub{
-		performResult: &service.UpdateExecutionResult{
-			AutomaticRestart: true,
-			TargetVersion:    "0.1.156-xd.5",
-			TargetImage:      "ghcr.io/xiao-dan-1/sub2api:latest",
-		},
-	}
-	repo := newMemoryIdempotencyRepoStub()
-	router := newSystemHandlerTestRouter(t, updateSvc, repo)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/system/update", nil)
-	req.Header.Set("Idempotency-Key", "automatic-restart")
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	var body systemUpdateResponseEnvelope
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	require.False(t, body.Data.NeedRestart)
-	require.True(t, body.Data.AutomaticRestart)
-	require.Equal(t, "0.1.156-xd.5", body.Data.TargetVersion)
-	require.Equal(t, "ghcr.io/xiao-dan-1/sub2api:latest", body.Data.TargetImage)
 }
 
 func TestSystemHandlerRollbackWithoutBodyUsesLegacyBackup(t *testing.T) {
