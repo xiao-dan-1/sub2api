@@ -6,11 +6,11 @@
         @click="toggleDropdown"
         class="flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs transition-colors"
         :class="[
-          hasUpdate
+          displayHasUpdate
             ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
             : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-800 dark:text-dark-400 dark:hover:bg-dark-700'
         ]"
-        :title="hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
+        :title="displayHasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
       >
         <span v-if="currentVersion" class="font-medium">v{{ currentVersion }}</span>
         <span
@@ -18,7 +18,7 @@
           class="h-3 w-12 animate-pulse rounded bg-gray-200 font-medium dark:bg-dark-600"
         ></span>
         <!-- Update indicator -->
-        <span v-if="hasUpdate" class="relative flex h-2 w-2">
+        <span v-if="displayHasUpdate" class="relative flex h-2 w-2">
           <span
             class="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75"
           ></span>
@@ -89,7 +89,7 @@
                   <span v-else class="text-2xl font-bold text-gray-400 dark:text-dark-500">--</span>
                   <!-- Show check mark when up to date -->
                   <span
-                    v-if="!hasUpdate"
+                    v-if="!displayHasUpdate"
                     class="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
                   >
                     <svg
@@ -107,8 +107,8 @@
                 </div>
                 <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
                   {{
-                    hasUpdate
-                      ? t('version.latestVersion') + ': v' + latestVersion
+                    displayHasUpdate
+                      ? t('version.latestVersion') + ': v' + displayLatestVersion
                       : t('version.upToDate')
                   }}
                 </p>
@@ -274,7 +274,7 @@
               </div>
 
               <!-- Priority 4: Custom image update or build-waiting state -->
-              <div v-else-if="hasUpdate && isCustomBuild" class="space-y-2">
+              <div v-else-if="isCustomBuild && hasCustomUpdateStatus" class="space-y-2">
                 <div
                   v-if="customUpdateReady"
                   data-testid="custom-update-ready"
@@ -783,22 +783,26 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore, useAppStore } from '@/stores'
 import {
-  getPublicVersion,
   performUpdate,
   restartService,
   getRollbackVersions,
   rollback as rollbackAPI,
   type RollbackVersionInfo
 } from '@/api/admin/system'
+import {
+  CustomImageRestartTimeoutError,
+  checkCustomImageUpdate,
+  isExpectedContainerReplacementError,
+  triggerCustomImageUpdate,
+  waitForCustomImageVersion,
+  type CustomImageUpdateInfo
+} from '@/api/admin/custom-image-update'
 import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
 
 const GITHUB_REPO = 'Wei-Shaw/sub2api'
 // Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
 const DOCKER_IMAGE = 'weishaw/sub2api'
-const CUSTOM_UPDATE_POLL_INITIAL_DELAY_MS = 1500
-const CUSTOM_UPDATE_POLL_INTERVAL_MS = 2000
-const CUSTOM_UPDATE_POLL_TIMEOUT_MS = 10 * 60 * 1000
 
 const { t } = useI18n()
 
@@ -815,21 +819,19 @@ const dropdownOpen = ref(false)
 const dropdownRef = ref<HTMLElement | null>(null)
 
 // Use store's cached version state
-const loading = computed(() => appStore.versionLoading)
+const customUpdateLoading = ref(false)
+const loading = computed(() => appStore.versionLoading || customUpdateLoading.value)
 const currentVersion = computed(() => appStore.currentVersion || props.version || '')
 const latestVersion = computed(() => appStore.latestVersion)
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
 const buildType = computed(() => appStore.buildType)
-const customVersion = computed(() => appStore.customVersion)
-const customUpdateReady = computed(() => appStore.customUpdateReady)
-const customUpdateWarning = computed(() => appStore.customUpdateWarning)
-const customUpdateMessage = computed(() => {
-  if (/^waiting for custom container image matching\b/i.test(customUpdateWarning.value)) {
-    return t('version.customBuildPendingHint')
-  }
-  return customUpdateWarning.value
-})
+const customUpdateInfo = ref<CustomImageUpdateInfo | null>(null)
+const customVersion = computed(() => customUpdateInfo.value?.target_version || '')
+const customUpdateAvailable = computed(() => customUpdateInfo.value?.has_update ?? false)
+const customUpdateReady = computed(() => customUpdateInfo.value?.ready ?? false)
+const customUpdateWarning = computed(() => customUpdateInfo.value?.warning || '')
+const customUpdateMessage = computed(() => customUpdateWarning.value)
 
 // Update process states (local to this component)
 const updating = ref(false)
@@ -840,7 +842,7 @@ const updateSuccess = ref(false)
 const restartCountdown = ref(0)
 const automaticRestarting = ref(false)
 const automaticTargetVersion = ref('')
-let componentUnmounted = false
+let customUpdatePollController: AbortController | null = null
 // Distinguishes the success + restart panel between update and rollback flows
 const successKind = ref<'update' | 'rollback'>('update')
 
@@ -885,10 +887,19 @@ const activeManualCommand = computed(() =>
   manualTab.value === 'docker' ? dockerRollbackCommand.value : scriptRollbackCommand.value
 )
 
-const isCustomBuild = computed(() => buildType.value === 'custom')
-const isSourceBuild = computed(() => buildType.value === 'source')
+const isCustomBuild = computed(() => /-xd\.\d+$/i.test(currentVersion.value))
+const isSourceBuild = computed(() => !isCustomBuild.value && buildType.value === 'source')
 // Official release builds use the existing in-place binary updater.
-const isReleaseBuild = computed(() => buildType.value === 'release')
+const isReleaseBuild = computed(() => !isCustomBuild.value && buildType.value === 'release')
+const hasCustomUpdateStatus = computed(
+  () => customUpdateAvailable.value || customUpdateWarning.value.length > 0
+)
+const displayHasUpdate = computed(() =>
+  isCustomBuild.value ? customUpdateAvailable.value : hasUpdate.value
+)
+const displayLatestVersion = computed(() =>
+  isCustomBuild.value ? customVersion.value || currentVersion.value : latestVersion.value
+)
 
 function toggleDropdown() {
   dropdownOpen.value = !dropdownOpen.value
@@ -910,6 +921,31 @@ async function refreshVersion(force = true) {
   resetRollbackState()
 
   await appStore.fetchVersion(force)
+  await refreshCustomImageUpdate()
+}
+
+async function refreshCustomImageUpdate() {
+  if (!isAdmin.value || !isCustomBuild.value) {
+    customUpdateInfo.value = null
+    return
+  }
+
+  customUpdateLoading.value = true
+  try {
+    customUpdateInfo.value = await checkCustomImageUpdate()
+  } catch (error: unknown) {
+    const err = error as { message?: string }
+    customUpdateInfo.value = {
+      current_version: currentVersion.value,
+      has_update: false,
+      target_ready: false,
+      latest_alias_ready: false,
+      ready: false,
+      warning: err.message || t('version.updateFailed')
+    }
+  } finally {
+    customUpdateLoading.value = false
+  }
 }
 
 async function handleUpdate() {
@@ -922,18 +958,34 @@ async function handleUpdate() {
   automaticTargetVersion.value = ''
 
   try {
-    const result = await performUpdate()
-    if (result.automatic_restart) {
-      const targetVersion = result.target_version || customVersion.value
+    if (isCustomBuild.value) {
+      let targetVersion = customVersion.value
+      try {
+        const result = await triggerCustomImageUpdate()
+        targetVersion = result.target_version || targetVersion
+      } catch (error: unknown) {
+        if (!isExpectedContainerReplacementError(error) || !targetVersion) {
+          throw error
+        }
+      }
       if (!targetVersion) {
         throw new Error(t('version.containerTargetMissing'))
       }
       automaticTargetVersion.value = targetVersion
       automaticRestarting.value = true
       appStore.clearVersionCache()
-      await waitForTargetVersion(targetVersion)
+      customUpdatePollController?.abort()
+      customUpdatePollController = new AbortController()
+      const detected = await waitForCustomImageVersion(targetVersion, {
+        signal: customUpdatePollController.signal
+      })
+      if (detected) {
+        window.location.reload()
+      }
       return
     }
+
+    const result = await performUpdate()
     successKind.value = 'update'
     updateSuccess.value = true
     needRestart.value = result.need_restart
@@ -941,16 +993,8 @@ async function handleUpdate() {
     appStore.clearVersionCache()
   } catch (error: unknown) {
     const err = error as { response?: { data?: { message?: string } }; message?: string }
-    if (isCustomBuild.value && !err.response && customVersion.value && !automaticRestarting.value) {
-      automaticTargetVersion.value = customVersion.value
-      automaticRestarting.value = true
-      try {
-        await waitForTargetVersion(customVersion.value)
-        return
-      } catch (pollError: unknown) {
-        const polling = pollError as { message?: string }
-        updateError.value = polling.message || t('version.containerRestartTimeout')
-      }
+    if (error instanceof CustomImageRestartTimeoutError) {
+      updateError.value = t('version.containerRestartTimeout')
     } else {
       updateError.value = err.response?.data?.message || err.message || t('version.updateFailed')
     }
@@ -958,33 +1002,6 @@ async function handleUpdate() {
   } finally {
     updating.value = false
   }
-}
-
-async function waitForTargetVersion(targetVersion: string) {
-  const deadline = Date.now() + CUSTOM_UPDATE_POLL_TIMEOUT_MS
-
-  await new Promise((resolve) => setTimeout(resolve, CUSTOM_UPDATE_POLL_INITIAL_DELAY_MS))
-  while (!componentUnmounted && Date.now() < deadline) {
-    try {
-      const info = await getPublicVersion()
-      if (info.version === targetVersion) {
-        window.location.reload()
-        return
-      }
-    } catch {
-      // Temporary connection failures are expected while Docker replaces the container.
-    }
-
-    const remaining = deadline - Date.now()
-    if (remaining > 0 && !componentUnmounted) {
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.min(CUSTOM_UPDATE_POLL_INTERVAL_MS, remaining))
-      )
-    }
-  }
-
-  if (componentUnmounted) return
-  throw new Error(t('version.containerRestartTimeout'))
 }
 
 function resetRollbackState() {
@@ -1127,12 +1144,13 @@ onMounted(() => {
   if (isAdmin.value) {
     // Use cached version if available, otherwise fetch
     appStore.fetchVersion(false)
+    void refreshCustomImageUpdate()
   }
   document.addEventListener('click', handleClickOutside)
 })
 
 onBeforeUnmount(() => {
-  componentUnmounted = true
+  customUpdatePollController?.abort()
   document.removeEventListener('click', handleClickOutside)
 })
 </script>

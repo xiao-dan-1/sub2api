@@ -1,51 +1,54 @@
-import { mount, flushPromises } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
-import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import VersionBadge from '@/components/common/VersionBadge.vue'
 
-const apiMocks = vi.hoisted(() => ({
+const systemAPIMocks = vi.hoisted(() => ({
   performUpdate: vi.fn(),
-  checkUpdates: vi.fn(),
-  getVersion: vi.fn(),
-  getPublicVersion: vi.fn(),
   restartService: vi.fn(),
   getRollbackVersions: vi.fn(),
   rollback: vi.fn()
+}))
+
+const customImageAPIMocks = vi.hoisted(() => ({
+  checkCustomImageUpdate: vi.fn(),
+  triggerCustomImageUpdate: vi.fn(),
+  waitForCustomImageVersion: vi.fn(),
+  isExpectedContainerReplacementError: vi.fn()
 }))
 
 const storeMocks = vi.hoisted(() => ({
   auth: { isAdmin: true },
   app: {
     versionLoading: false,
-    currentVersion: '0.1.156-xd.4',
-    latestVersion: '0.1.156',
-    hasUpdate: true,
+    currentVersion: '0.1.162-xd.4',
+    latestVersion: '0.1.162',
+    hasUpdate: false,
     releaseInfo: {
-      name: 'v0.1.156',
+      name: 'v0.1.162',
       body: 'notes',
-      published_at: '2026-07-15T00:00:00Z',
-      html_url: 'https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.156'
+      published_at: '2026-07-20T00:00:00Z',
+      html_url: 'https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.162'
     },
-    buildType: 'custom',
-    customVersion: '0.1.156-xd.5',
-    customImage: 'ghcr.io/xiao-dan-1/sub2api',
-    customReleaseUrl: 'https://github.com/xiao-dan-1/sub2api/releases/tag/v0.1.156-xd.5',
-    customUpdateAvailable: true,
-    customUpdateReady: true,
-    customUpdateWarning: '',
+    buildType: 'release',
     fetchVersion: vi.fn(),
     clearVersionCache: vi.fn()
   }
 }))
 
 vi.mock('@/api/admin/system', () => ({
-  performUpdate: apiMocks.performUpdate,
-  checkUpdates: apiMocks.checkUpdates,
-  getVersion: apiMocks.getVersion,
-  getPublicVersion: apiMocks.getPublicVersion,
-  restartService: apiMocks.restartService,
-  getRollbackVersions: apiMocks.getRollbackVersions,
-  rollback: apiMocks.rollback
+  performUpdate: systemAPIMocks.performUpdate,
+  restartService: systemAPIMocks.restartService,
+  getRollbackVersions: systemAPIMocks.getRollbackVersions,
+  rollback: systemAPIMocks.rollback
+}))
+
+vi.mock('@/api/admin/custom-image-update', () => ({
+  checkCustomImageUpdate: customImageAPIMocks.checkCustomImageUpdate,
+  triggerCustomImageUpdate: customImageAPIMocks.triggerCustomImageUpdate,
+  waitForCustomImageVersion: customImageAPIMocks.waitForCustomImageVersion,
+  isExpectedContainerReplacementError: customImageAPIMocks.isExpectedContainerReplacementError,
+  CustomImageRestartTimeoutError: class CustomImageRestartTimeoutError extends Error {}
 }))
 
 vi.mock('@/stores', () => ({
@@ -71,9 +74,23 @@ vi.mock('vue-i18n', async (importOriginal) => {
   }
 })
 
+const readyInfo = {
+  current_version: '0.1.162-xd.4',
+  target_version: '0.1.162-xd.5',
+  image: 'ghcr.io/xiao-dan-1/sub2api',
+  target_image: 'ghcr.io/xiao-dan-1/sub2api:0.1.162-xd.5',
+  target_digest: 'sha256:ready',
+  release_url: 'https://github.com/xiao-dan-1/sub2api/releases/tag/v0.1.162-xd.5',
+  has_update: true,
+  target_ready: true,
+  latest_alias_ready: true,
+  ready: true,
+  warning: ''
+}
+
 function mountBadge() {
   return mount(VersionBadge, {
-    props: { version: '0.1.156-xd.4' },
+    props: { version: '0.1.162-xd.4' },
     global: {
       stubs: {
         Icon: { template: '<span class="icon-stub" />' }
@@ -82,9 +99,12 @@ function mountBadge() {
   })
 }
 
-async function openDropdown(wrapper: ReturnType<typeof mountBadge>) {
+async function mountAndOpenBadge() {
+  const wrapper = mountBadge()
+  await flushPromises()
   await wrapper.find('button').trigger('click')
   await nextTick()
+  return wrapper
 }
 
 describe('VersionBadge custom container update', () => {
@@ -92,107 +112,102 @@ describe('VersionBadge custom container update', () => {
     vi.clearAllMocks()
     Object.assign(storeMocks.app, {
       versionLoading: false,
-      currentVersion: '0.1.156-xd.4',
-      latestVersion: '0.1.156',
-      hasUpdate: true,
-      buildType: 'custom',
-      customVersion: '0.1.156-xd.5',
-      customImage: 'ghcr.io/xiao-dan-1/sub2api',
-      customUpdateAvailable: true,
-      customUpdateReady: true,
-      customUpdateWarning: ''
+      currentVersion: '0.1.162-xd.4',
+      latestVersion: '0.1.162',
+      hasUpdate: false,
+      buildType: 'release'
     })
+    customImageAPIMocks.checkCustomImageUpdate.mockResolvedValue({ ...readyInfo })
+    customImageAPIMocks.triggerCustomImageUpdate.mockResolvedValue({
+      message: 'scheduled',
+      operation_id: 'sysop-123',
+      target_version: '0.1.162-xd.5',
+      target_image: 'ghcr.io/xiao-dan-1/sub2api:0.1.162-xd.5',
+      target_digest: 'sha256:ready',
+      automatic_restart: true
+    })
+    customImageAPIMocks.waitForCustomImageVersion.mockImplementation(() => new Promise(() => undefined))
+    customImageAPIMocks.isExpectedContainerReplacementError.mockReturnValue(false)
   })
 
-  afterEach(() => {
-    vi.useRealTimers()
-  })
+  it('detects an xd build from its version and shows the isolated ready target', async () => {
+    const wrapper = await mountAndOpenBadge()
 
-  it('keeps the author release visible and shows the exact ready custom target', async () => {
-    const wrapper = mountBadge()
-    await openDropdown(wrapper)
-
+    expect(customImageAPIMocks.checkCustomImageUpdate).toHaveBeenCalledTimes(1)
     const ready = wrapper.get('[data-testid="custom-update-ready"]')
-    expect(ready.text()).toContain('0.1.156-xd.5')
+    expect(ready.text()).toContain('0.1.162-xd.5')
     expect(wrapper.get('[data-testid="custom-update-button"]').exists()).toBe(true)
     expect(
-      wrapper.get('a[href="https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.156"]').exists()
+      wrapper.get('a[href="https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.162"]').exists()
     ).toBe(true)
 
     wrapper.unmount()
   })
 
-  it('shows a waiting state without offering the upstream image', async () => {
-    Object.assign(storeMocks.app, {
-      latestVersion: '0.1.157',
-      customVersion: '',
-      customUpdateAvailable: false,
-      customUpdateReady: false,
-      customUpdateWarning: 'waiting for custom container image matching 0.1.157'
+  it('shows registry readiness warnings without offering an unsafe update', async () => {
+    customImageAPIMocks.checkCustomImageUpdate.mockResolvedValue({
+      ...readyInfo,
+      ready: false,
+      latest_alias_ready: false,
+      warning: 'custom container image latest tag does not yet match 0.1.162-xd.5'
     })
-    const wrapper = mountBadge()
-    await openDropdown(wrapper)
+
+    const wrapper = await mountAndOpenBadge()
 
     const waiting = wrapper.get('[data-testid="custom-update-waiting"]')
-    expect(waiting.text()).toContain('0.1.157')
-    expect(waiting.text()).toContain('version.customBuildPendingHint')
+    expect(waiting.text()).toContain('latest')
     expect(wrapper.find('[data-testid="custom-update-button"]').exists()).toBe(false)
-    expect(
-      wrapper.get('a[href="https://github.com/Wei-Shaw/sub2api/releases/tag/v0.1.156"]').exists()
-    ).toBe(true)
 
     wrapper.unmount()
   })
 
-  it('polls the public version endpoint while reconnecting after an automatic restart', async () => {
-    vi.useFakeTimers()
-    apiMocks.performUpdate.mockResolvedValue({
-      message: 'scheduled',
-      need_restart: false,
-      automatic_restart: true,
-      target_version: '0.1.156-xd.5',
-      target_image: 'ghcr.io/xiao-dan-1/sub2api:latest'
-    })
-    apiMocks.getPublicVersion.mockImplementation(() => new Promise(() => undefined))
-    const wrapper = mountBadge()
-    await openDropdown(wrapper)
+  it('uses the custom endpoint and delegates restart polling to the custom module', async () => {
+    const wrapper = await mountAndOpenBadge()
 
     await wrapper.get('[data-testid="custom-update-button"]').trigger('click')
     await flushPromises()
 
-    expect(apiMocks.performUpdate).toHaveBeenCalledTimes(1)
+    expect(customImageAPIMocks.triggerCustomImageUpdate).toHaveBeenCalledTimes(1)
+    expect(systemAPIMocks.performUpdate).not.toHaveBeenCalled()
     expect(wrapper.get('[data-testid="custom-update-reconnecting"]').text()).toContain(
-      '0.1.156-xd.5'
+      '0.1.162-xd.5'
     )
-    await vi.advanceTimersByTimeAsync(1500)
-    expect(apiMocks.getPublicVersion).toHaveBeenCalledTimes(1)
-    expect(apiMocks.getVersion).not.toHaveBeenCalled()
-    expect(apiMocks.checkUpdates).not.toHaveBeenCalled()
+    expect(customImageAPIMocks.waitForCustomImageVersion).toHaveBeenCalledWith(
+      '0.1.162-xd.5',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
 
     wrapper.unmount()
   })
 
-  it('stops public version polling after the component unmounts', async () => {
-    vi.useFakeTimers()
-    apiMocks.performUpdate.mockResolvedValue({
-      message: 'accepted',
-      need_restart: false,
-      automatic_restart: true,
-      target_version: '0.1.156-xd.5',
-      target_image: 'ghcr.io/xiao-dan-1/sub2api:latest'
+  it('starts polling after an expected connection loss during replacement', async () => {
+    customImageAPIMocks.triggerCustomImageUpdate.mockRejectedValue({
+      status: 0,
+      message: 'Network error'
     })
-    apiMocks.getPublicVersion.mockRejectedValue(new Error('offline'))
-    const wrapper = mountBadge()
-    await openDropdown(wrapper)
+    customImageAPIMocks.isExpectedContainerReplacementError.mockReturnValue(true)
+    const wrapper = await mountAndOpenBadge()
 
     await wrapper.get('[data-testid="custom-update-button"]').trigger('click')
     await flushPromises()
-    await vi.advanceTimersByTimeAsync(1500)
-    expect(apiMocks.getPublicVersion).toHaveBeenCalledTimes(1)
+
+    expect(customImageAPIMocks.waitForCustomImageVersion).toHaveBeenCalledWith(
+      '0.1.162-xd.5',
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(wrapper.get('[data-testid="custom-update-reconnecting"]').exists()).toBe(true)
 
     wrapper.unmount()
-    await vi.advanceTimersByTimeAsync(10_000)
+  })
 
-    expect(apiMocks.getPublicVersion).toHaveBeenCalledTimes(1)
+  it('aborts module-owned polling when the component unmounts', async () => {
+    const wrapper = await mountAndOpenBadge()
+    await wrapper.get('[data-testid="custom-update-button"]').trigger('click')
+    await flushPromises()
+    const options = customImageAPIMocks.waitForCustomImageVersion.mock.calls[0][1]
+
+    wrapper.unmount()
+
+    expect(options.signal.aborted).toBe(true)
   })
 })
