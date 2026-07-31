@@ -30,6 +30,8 @@ services:
     labels:
       - com.centurylinklabs.watchtower.enable=true
       - com.centurylinklabs.watchtower.scope=${WATCHTOWER_SCOPE:?WATCHTOWER_SCOPE is required}
+    security_opt:
+      - no-new-privileges:true
     ulimits:
       nofile:
         soft: 100000
